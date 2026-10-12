@@ -124,6 +124,7 @@ function App() {
   const [videoInputError, setVideoInputError] = useState<string | null>(null);
   const {
     phase,
+    uid,
     error: syncError,
     remoteState,
     serverTimeOffset,
@@ -134,6 +135,9 @@ function App() {
     isQueueUpdating,
     addToQueue,
     removeFromQueue,
+    participants,
+    hostId,
+    presenceError,
   } = usePlaybackSync(roomId);
   const currentVideoId = remoteState?.videoId ?? VIDEO_ID;
 
@@ -372,7 +376,7 @@ function App() {
       </nav>
 
       <section className="hero" aria-labelledby="page-title">
-        <p className="eyebrow">PROOF OF CONCEPT · SHAREABLE ROOMS</p>
+        <p className="eyebrow">PROOF OF CONCEPT · LIVE LISTENING ROOMS</p>
         <h1 id="page-title">One room.<br /><span>One moment.</span></h1>
         <p className="lede">
           {roomId
@@ -404,6 +408,32 @@ function App() {
           <button type="button" onClick={copyInvite}>{copyLabel}</button>
           <button type="button" className="leave-room" onClick={leaveRoom}>Leave room</button>
         </div>
+      </section>
+
+      <section className="presence-card" aria-label="Room participants">
+        <div className="presence-summary">
+          <span className={`role-badge ${uid && uid === hostId ? "is-host" : ""}`}>
+            {uid && uid === hostId ? "HOST" : "GUEST"}
+          </span>
+          <div>
+            <strong>{participants.length} {participants.length === 1 ? "listener" : "listeners"}</strong>
+            <span>{hostId ? "Room host is online" : "Electing a room host…"}</span>
+          </div>
+        </div>
+        <div className="participant-list" aria-label="Connected listeners">
+          {participants.slice(0, 6).map((participant) => {
+            const isYou = participant.uid === uid;
+            const isHost = participant.uid === hostId;
+            return (
+              <span className={isHost ? "participant is-host" : "participant"} key={participant.uid}>
+                <i aria-hidden="true">{isHost ? "★" : "●"}</i>
+                {isYou ? "YOU" : `P-${participant.uid.slice(-4).toUpperCase()}`}
+              </span>
+            );
+          })}
+          {participants.length > 6 && <span className="participant-more">+{participants.length - 6}</span>}
+        </div>
+        {presenceError && <p role="alert">{presenceError}</p>}
       </section>
 
       <form className="video-selector" onSubmit={selectVideo} aria-label="Change the room video">
@@ -553,9 +583,9 @@ function App() {
       )}
 
       <footer>
-        <span>STEP 05</span>
+        <span>STEP 06</span>
         <div className="footer-line" />
-        <p>Collaborative queue · shared video selection · synchronized playback</p>
+        <p>Live participants · automatic host election · collaborative playback</p>
       </footer>
     </main>
   );

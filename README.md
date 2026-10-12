@@ -1,6 +1,6 @@
 # YT Jam POC
 
-A React + TypeScript proof of concept with shareable listening rooms, a collaborative video queue, and synchronized YouTube playback using Firebase Realtime Database.
+A React + TypeScript proof of concept with shareable listening rooms, live participant presence, automatic host election, a collaborative video queue, and synchronized YouTube playback using Firebase Realtime Database.
 
 ## Firebase setup
 
@@ -12,7 +12,7 @@ A React + TypeScript proof of concept with shareable listening rooms, a collabor
 
 Firebase's web configuration identifies the project; access is protected by Authentication and Realtime Database Security Rules. Never place service-account credentials or private keys in this frontend project.
 
-The rules grant authenticated anonymous users read/write access only to valid room playback paths. After changing `database.rules.json`, publish it in the Firebase console or deploy it from an authenticated Firebase CLI:
+The rules grant authenticated anonymous users scoped access to playback, queue, presence, and host-election data for valid rooms. After changing `database.rules.json`, publish it in the Firebase console or deploy it from an authenticated Firebase CLI:
 
 ```bash
 npx firebase-tools deploy --only database
@@ -25,7 +25,7 @@ pnpm install
 pnpm dev
 ```
 
-Open the local URL, create a room, and copy its invite link into a second independent browser session. Paste a YouTube URL or video ID to play it immediately or add it to the collaborative queue. Click **Enable synced playback** once in each browser, then Play, Pause, Seek to 30 seconds, or select a queued video in either browser.
+Open the local URL, create a room, and copy its invite link into a second independent browser session. Each connected browser appears in the participant strip; the first participant becomes host, and another participant takes over automatically when the host disconnects. Paste a YouTube URL or video ID to play it immediately or add it to the collaborative queue. Click **Enable synced playback** once in each browser, then Play, Pause, Seek to 30 seconds, or select a queued video in either browser.
 
 Room IDs are stored in the `?room=` query parameter and contain 4–32 lowercase letters, numbers, or dashes. Creating or joining a room does not write to Firebase; its playback record is created by the first playback control command.
 

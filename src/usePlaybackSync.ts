@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   child,
+  onDisconnect,
   onValue,
   push,
   ref,
   remove,
+  runTransaction,
   serverTimestamp,
   set,
   type DatabaseReference,
@@ -13,9 +15,11 @@ import { ensureAnonymousUser, firebaseSetup } from "./firebase";
 import {
   VIDEO_ID,
   parsePlaybackState,
+  parseParticipants,
   parseQueue,
   type PlaybackState,
   type PlaybackStatus,
+  type Participant,
   type QueueItem,
 } from "./sync";
 
@@ -42,6 +46,9 @@ export function usePlaybackSync(roomId: string | null) {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [queueError, setQueueError] = useState<string | null>(null);
   const [isQueueUpdating, setIsQueueUpdating] = useState(false);
+  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [hostId, setHostId] = useState<string | null>(null);
+  const [presenceError, setPresenceError] = useState<string | null>(null);
   const playbackRef = useRef<DatabaseReference | null>(null);
   const queueRef = useRef<DatabaseReference | null>(null);
 
@@ -55,11 +62,22 @@ export function usePlaybackSync(roomId: string | null) {
     setQueue([]);
     setQueueError(null);
     setIsQueueUpdating(false);
+    setParticipants([]);
+    setHostId(null);
+    setPresenceError(null);
 
     if (!firebaseSetup.services || !roomId) return;
 
     let active = true;
     let authenticated = false;
+    let authenticatedUid: string | null = null;
+    let databaseConnected = false;
+    let currentHostId: string | null = null;
+    let claimingHost = false;
+    let participantDisconnect: ReturnType<typeof onDisconnect> | null = null;
+    let hostDisconnect: ReturnType<typeof onDisconnect> | null = null;
+    let participantReference: DatabaseReference | null = null;
+    let hostReference: DatabaseReference | null = null;
     const unsubscribers: Array<() => void> = [];
     const { auth, database } = firebaseSetup.services;
 
@@ -69,15 +87,78 @@ export function usePlaybackSync(roomId: string | null) {
         if (!active) return;
 
         authenticated = true;
+        authenticatedUid = user.uid;
         setUid(user.uid);
         const roomPlaybackRef = ref(database, `rooms/${roomId}/playback`);
         const roomQueueRef = ref(database, `rooms/${roomId}/queue`);
+        const roomParticipantsRef = ref(database, `rooms/${roomId}/participants`);
+        const roomHostRef = ref(database, `rooms/${roomId}/hostId`);
+        const ownParticipantRef = child(roomParticipantsRef, user.uid);
         playbackRef.current = roomPlaybackRef;
         queueRef.current = roomQueueRef;
+        participantReference = ownParticipantRef;
+        hostReference = roomHostRef;
+
+        const reportPresenceError = (error: unknown) => {
+          if (!active) return;
+          const message = error instanceof Error ? error.message : "Unknown Firebase error";
+          setPresenceError(
+            message.toLowerCase().includes("permission_denied") || message.includes("PERMISSION_DENIED")
+              ? "Publish the latest database.rules.json to enable live participants and host election."
+              : `Presence synchronization failed: ${message}`,
+          );
+        };
+
+        const scheduleHostDisconnect = async () => {
+          try {
+            const disconnect = onDisconnect(roomHostRef);
+            await disconnect.remove();
+            if (active) hostDisconnect = disconnect;
+            else await disconnect.cancel();
+          } catch (error) {
+            reportPresenceError(error);
+          }
+        };
+
+        const claimHost = async () => {
+          if (!active || !databaseConnected || claimingHost || currentHostId) return;
+          claimingHost = true;
+          try {
+            const result = await runTransaction(
+              roomHostRef,
+              (current) => current ?? user.uid,
+              { applyLocally: false },
+            );
+            if (result.committed && result.snapshot.val() === user.uid) {
+              await scheduleHostDisconnect();
+            }
+          } catch (error) {
+            reportPresenceError(error);
+          } finally {
+            claimingHost = false;
+          }
+        };
 
         unsubscribers.push(
           onValue(ref(database, ".info/connected"), (snapshot) => {
-            if (active) setConnected(snapshot.val() === true);
+            if (!active) return;
+            const isConnected = snapshot.val() === true;
+            databaseConnected = isConnected;
+            setConnected(isConnected);
+            if (!isConnected) return;
+
+            void (async () => {
+              try {
+                const disconnect = onDisconnect(ownParticipantRef);
+                await disconnect.remove();
+                participantDisconnect = disconnect;
+                await set(ownParticipantRef, { joinedAt: serverTimestamp() });
+                setPresenceError(null);
+                await claimHost();
+              } catch (error) {
+                reportPresenceError(error);
+              }
+            })();
           }),
           onValue(ref(database, ".info/serverTimeOffset"), (snapshot) => {
             const offset = snapshot.val();
@@ -131,6 +212,25 @@ export function usePlaybackSync(roomId: string | null) {
               );
             },
           ),
+          onValue(
+            roomParticipantsRef,
+            (snapshot) => {
+              if (!active) return;
+              setParticipants(parseParticipants(snapshot.val()));
+            },
+            reportPresenceError,
+          ),
+          onValue(
+            roomHostRef,
+            (snapshot) => {
+              if (!active) return;
+              const value = snapshot.val();
+              currentHostId = typeof value === "string" && value.length > 0 ? value : null;
+              setHostId(currentHostId);
+              if (!currentHostId) void claimHost();
+            },
+            reportPresenceError,
+          ),
         );
 
       })
@@ -148,6 +248,14 @@ export function usePlaybackSync(roomId: string | null) {
       playbackRef.current = null;
       queueRef.current = null;
       unsubscribers.forEach((unsubscribe) => unsubscribe());
+      void participantDisconnect?.cancel().catch(() => undefined);
+      void hostDisconnect?.cancel().catch(() => undefined);
+      if (participantReference) void remove(participantReference).catch(() => undefined);
+      if (hostReference && authenticatedUid && currentHostId === authenticatedUid) {
+        void runTransaction(hostReference, (current) => (current === authenticatedUid ? null : current), {
+          applyLocally: false,
+        }).catch(() => undefined);
+      }
     };
   }, [roomId]);
 
@@ -243,6 +351,7 @@ export function usePlaybackSync(roomId: string | null) {
 
   return {
     phase,
+    uid,
     error: firebaseSetup.error ?? runtimeError,
     remoteState,
     serverTimeOffset,
@@ -253,5 +362,8 @@ export function usePlaybackSync(roomId: string | null) {
     isQueueUpdating,
     addToQueue,
     removeFromQueue,
+    participants,
+    hostId,
+    presenceError,
   };
 }

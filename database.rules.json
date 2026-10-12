@@ -48,6 +48,24 @@
               ".validate": false
             }
           }
+        },
+        "participants": {
+          ".read": "auth != null && $roomId.matches(/^[a-z0-9-]{4,32}$/)",
+          "$uid": {
+            ".write": "auth != null && auth.uid === $uid && $roomId.matches(/^[a-z0-9-]{4,32}$/)",
+            ".validate": "!newData.exists() || newData.hasChildren(['joinedAt'])",
+            "joinedAt": {
+              ".validate": "newData.isNumber() && newData.val() <= now + 10000"
+            },
+            "$other": {
+              ".validate": false
+            }
+          }
+        },
+        "hostId": {
+          ".read": "auth != null && $roomId.matches(/^[a-z0-9-]{4,32}$/)",
+          ".write": "auth != null && $roomId.matches(/^[a-z0-9-]{4,32}$/) && ((!data.exists() && newData.val() === auth.uid) || (data.val() === auth.uid && !newData.exists()))",
+          ".validate": "!newData.exists() || (newData.isString() && newData.val() === auth.uid)"
         }
       }
     }

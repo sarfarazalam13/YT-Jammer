@@ -5,6 +5,7 @@ import {
   extractYouTubeVideoId,
   isOwnLatestCommand,
   parsePlaybackState,
+  parseParticipants,
   parseQueue,
   shouldSeek,
   type PlaybackState,
@@ -86,5 +87,19 @@ describe("playback synchronization helpers", () => {
       { id: "second", videoId: "M7lc1UVf-VE", addedAt: 20, addedBy: "user-2" },
     ]);
     expect(parseQueue(null)).toEqual([]);
+  });
+
+  it("parses participants and orders them by join time", () => {
+    expect(
+      parseParticipants({
+        later: { joinedAt: 20 },
+        invalid: { joinedAt: "now" },
+        first: { joinedAt: 10 },
+      }),
+    ).toEqual([
+      { uid: "first", joinedAt: 10 },
+      { uid: "later", joinedAt: 20 },
+    ]);
+    expect(parseParticipants(null)).toEqual([]);
   });
 });

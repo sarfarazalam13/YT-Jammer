@@ -20,6 +20,11 @@ export type QueueItem = {
   addedBy: string;
 };
 
+export type Participant = {
+  uid: string;
+  joinedAt: number;
+};
+
 export function parsePlaybackState(value: unknown): PlaybackState | null {
   if (!value || typeof value !== "object") return null;
 
@@ -104,6 +109,25 @@ export function parseQueue(value: unknown): QueueItem[] {
       return [{ id, videoId: item.videoId as string, addedAt: item.addedAt, addedBy: item.addedBy }];
     })
     .sort((a, b) => a.addedAt - b.addedAt || a.id.localeCompare(b.id));
+}
+
+export function parseParticipants(value: unknown): Participant[] {
+  if (!value || typeof value !== "object") return [];
+
+  return Object.entries(value as Record<string, unknown>)
+    .flatMap(([uid, rawParticipant]) => {
+      if (!uid || !rawParticipant || typeof rawParticipant !== "object") return [];
+      const participant = rawParticipant as Record<string, unknown>;
+      if (
+        typeof participant.joinedAt !== "number" ||
+        !Number.isFinite(participant.joinedAt) ||
+        participant.joinedAt < 0
+      ) {
+        return [];
+      }
+      return [{ uid, joinedAt: participant.joinedAt }];
+    })
+    .sort((a, b) => a.joinedAt - b.joinedAt || a.uid.localeCompare(b.uid));
 }
 
 export function expectedPosition(state: PlaybackState, serverNowMs: number): number {
