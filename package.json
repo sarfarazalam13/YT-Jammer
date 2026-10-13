@@ -16,9 +16,9 @@
     "firebase": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "react-youtube": "latest",
     "typescript": "latest",
-    "vite": "latest"
+    "vite": "latest",
+    "youtube-player": "5.5.2"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.0",

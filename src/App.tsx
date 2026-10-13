@@ -1,6 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import YouTube, { type YouTubeEvent, type YouTubePlayer } from "react-youtube";
 import { createRoomId, isValidRoomId, normalizeRoomId, roomIdFromSearch, roomUrl } from "./rooms";
+import { RoomYouTubePlayer, type YouTubePlayerApi } from "./RoomYouTubePlayer";
 import { LEGACY_VIDEO_ID, PLAYBACK_RATES, VIDEO_ID, clampPosition, expectedPosition, formatTime, isOwnLatestCommand, playbackVideo, selectAutoplayVideos, shouldSeek, type PlaybackState, type YouTubeVideo } from "./sync";
 import { type SyncPhase, usePlaybackSync } from "./usePlaybackSync";
 import { browserRegion, fetchYouTubeVideoPage, youtubeApiKey } from "./youtube";
@@ -55,7 +55,7 @@ function RoomLobby({ onCreate, onJoin }: { onCreate: () => void; onJoin: (roomId
 }
 
 function App() {
-  const playerRef = useRef<YouTubePlayer | null>(null);
+  const playerRef = useRef<YouTubePlayerApi | null>(null);
   const playerCardRef = useRef<HTMLElement | null>(null);
   const activationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoAdvanceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -70,6 +70,7 @@ function App() {
   const autoplayValidatedSeedRef = useRef<string | null>(null);
   const legacyPlaybackMigratedRef = useRef(false);
   const failedPlaybackCommandRef = useRef<string | null>(null);
+  const pendingPlaybackRef = useRef<{ commandId: string; videoId: string } | null>(null);
   const rejectedVideoIdsRef = useRef(readRejectedVideoIds(window.sessionStorage));
   const [playerStatus, setPlayerStatus] = useState<PlayerStatus>("loading");
   const [playerReady, setPlayerReady] = useState(false);
@@ -105,6 +106,7 @@ function App() {
 
   useEffect(() => {
     latestRemoteRef.current = remoteState;
+    if (pendingPlaybackRef.current && remoteState?.commandId !== pendingPlaybackRef.current.commandId && remoteState?.videoId !== pendingPlaybackRef.current.videoId) pendingPlaybackRef.current = null;
     if (remoteState?.videoId) playedVideoIdsRef.current.add(remoteState.videoId);
     if (remoteState?.status === "playing") setAutoplayMessage(null);
     if (remoteState?.commandId && remoteState.commandId !== failedPlaybackCommandRef.current) { setPlayerError(null); setPlayerErrorCode(null); }
@@ -129,6 +131,7 @@ function App() {
     autoplayValidatedSeedRef.current = null;
     legacyPlaybackMigratedRef.current = false;
     failedPlaybackCommandRef.current = null;
+    pendingPlaybackRef.current = null;
     setPlayerReady(false);
     setPlaybackEnabled(readPlayerPreferences(window.localStorage).playbackEnabled);
     setAudioUnlocked(false);
@@ -255,7 +258,7 @@ function App() {
       if (selected.length === 0) throw new Error("No fresh related videos are available right now.");
       if (autoplayRequestRef.current !== requestedVideoId) return;
       const saved = await replaceAutoplay(requestedVideoId, selected);
-      if (autoplayRequestRef.current === requestedVideoId && saved) setAutoplayMessage("Related autoplay ready");
+      if (autoplayRequestRef.current === requestedVideoId && saved) setAutoplayMessage(`${selected.length} related tracks ready`);
     })().catch((error: unknown) => {
       if (autoplayRequestRef.current === requestedVideoId) {
         setAutoplayMessage(error instanceof Error ? error.message : "Could not prepare related autoplay.");
@@ -288,7 +291,7 @@ function App() {
   }, [hostId, phase, publish, remoteState, uid]);
 
   const loadPlayerVideo = useCallback(async (
-    player: YouTubePlayer,
+    player: YouTubePlayerApi,
     videoId: string,
     startSeconds: number,
     status: "playing" | "paused",
@@ -353,8 +356,7 @@ function App() {
   useEffect(() => { const visible = () => { if (document.visibilityState === "visible") applyRemoteState(true); }; document.addEventListener("visibilitychange", visible); return () => document.removeEventListener("visibilitychange", visible); }, [applyRemoteState]);
   useEffect(() => () => { if (activationTimerRef.current) clearTimeout(activationTimerRef.current); if (autoAdvanceTimerRef.current) clearTimeout(autoAdvanceTimerRef.current); }, []);
 
-  const onReady = useCallback((event: YouTubeEvent) => {
-    const target = event.target;
+  const onReady = useCallback((target: YouTubePlayerApi) => {
     window.setTimeout(() => {
       let iframe: HTMLIFrameElement | null = null;
       try {
@@ -409,6 +411,7 @@ function App() {
     const rate = remoteState?.rate ?? 1;
     const result = await publish("playing", 0, { video, rate });
     if (!result.ok || playerRef.current !== player) return;
+    pendingPlaybackRef.current = { commandId: result.commandId, videoId: video.videoId };
     const loaded = await loadPlayerVideo(player, video.videoId, 0, "playing", rate);
     if (!loaded || playerRef.current !== player) return;
     lastAppliedCommandRef.current = result.commandId;
@@ -436,9 +439,8 @@ function App() {
     }).catch(() => setAutoplayMessage("Could not advance automatically. You can try Next again."));
   }, [advancePlayback, autoplay?.items.length, duration, publish, queue.length]);
 
-  const onPlayerError = useCallback((event: YouTubeEvent) => {
-    if (playerRef.current && event.target !== playerRef.current) return;
-    const errorCode = Number(event.data);
+  const onPlayerError = useCallback((errorCode: number, player: YouTubePlayerApi) => {
+    if (playerRef.current && player !== playerRef.current) return;
     setPlayerErrorCode(Number.isFinite(errorCode) ? errorCode : null);
     if (errorCode === 153) {
       setPlayerEmbedBlocked(true);
@@ -447,19 +449,24 @@ function App() {
       return;
     }
 
-    const failedState = latestRemoteRef.current;
-    if (!failedState) {
+    const remote = latestRemoteRef.current;
+    const loadedVideoId = player.getVideoData?.()?.video_id;
+    const pending = pendingPlaybackRef.current;
+    const pendingMatches = Boolean(pending && loadedVideoId && pending.videoId === loadedVideoId);
+    const remoteMatches = Boolean(remote && (!loadedVideoId || loadedVideoId === remote.videoId));
+    const failedCommandId = pendingMatches ? pending?.commandId : remoteMatches ? remote?.commandId : null;
+    const failedVideoId = pendingMatches ? pending?.videoId : remoteMatches ? remote?.videoId : null;
+    if (!failedCommandId || !failedVideoId) {
       setPlayerError("YouTube could not load this video. Choose another track from Surf YouTube.");
       return;
     }
 
-    const loadedVideoId = event.target.getVideoData?.()?.video_id;
-    if (loadedVideoId && loadedVideoId !== failedState.videoId) return;
-    if (failedPlaybackCommandRef.current === failedState.commandId) return;
+    if (failedPlaybackCommandRef.current === failedCommandId) return;
 
-    failedPlaybackCommandRef.current = failedState.commandId;
-    rememberRejectedVideoId(window.sessionStorage, rejectedVideoIdsRef.current, failedState.videoId);
-    playedVideoIdsRef.current.add(failedState.videoId);
+    failedPlaybackCommandRef.current = failedCommandId;
+    pendingPlaybackRef.current = null;
+    rememberRejectedVideoId(window.sessionStorage, rejectedVideoIdsRef.current, failedVideoId);
+    playedVideoIdsRef.current.add(failedVideoId);
     setPlayerEmbedBlocked(false);
     setPlayerStatus("paused");
     const hasNextVideo = queue.length > 0 || Boolean(autoplay?.items.length);
@@ -476,8 +483,8 @@ function App() {
     }
 
     setPlayerError(`${unavailableMessage} Skipping to the next track…`);
-    void advancePlayback(failedState.commandId).then((advanced) => {
-      if (!advanced && latestRemoteRef.current?.commandId === failedState.commandId) {
+    void advancePlayback(failedCommandId).then((advanced) => {
+      if (!advanced && latestRemoteRef.current?.commandId === failedCommandId) {
         failedPlaybackCommandRef.current = null;
         setPlayerError(`${unavailableMessage} Use Skip to try the next track.`);
       }
@@ -522,7 +529,9 @@ function App() {
         </div>
         <div className="player-layout">
           <div className="player-frame">
-            <YouTube key={`${window.location.origin}:${roomId}`} videoId={VIDEO_ID} onReady={onReady} onPlay={(event) => { if (playerRef.current !== event.target) return; setPlayerError(null); setPlayerErrorCode(null); setPlayerEmbedBlocked(false); setPlayerStatus("playing"); }} onPause={(event) => { if (playerRef.current === event.target) setPlayerStatus("paused"); }} onEnd={(event) => { if (playerRef.current === event.target) onEnded(); }} onError={onPlayerError} className="youtube-shell" iframeClassName="youtube-iframe" opts={{ width: "100%", height: "100%", playerVars: { autoplay: 0, controls: 0, disablekb: 1, rel: 0, origin: window.location.origin } }} />
+            {remoteState
+              ? <RoomYouTubePlayer key={`${window.location.origin}:${roomId}`} roomId={roomId} initialVideoId={remoteState.videoId} onReady={onReady} onPlay={() => { pendingPlaybackRef.current = null; setPlayerError(null); setPlayerErrorCode(null); setPlayerEmbedBlocked(false); setPlayerStatus("playing"); }} onPause={() => setPlayerStatus("paused")} onEnd={onEnded} onError={onPlayerError} onSetupError={(message) => { setPlayerReady(false); setPlayerEmbedBlocked(true); setPlayerError(message); }} />
+              : <div className="youtube-shell" aria-label="Loading synchronized YouTube player" />}
           </div>
           <div className="player-console">
             <div className="now-playing">
@@ -552,7 +561,7 @@ function App() {
           </div>
         </div>
       </section>
-      <section className="queue-card" aria-labelledby="queue-title"><header><div><span>COLLABORATIVE QUEUE</span><h2 id="queue-title">Up next</h2></div><strong>{queue.length} {queue.length === 1 ? "video" : "videos"}</strong></header>{queueError ? <p className="queue-message queue-error" role="alert">{queueError}</p> : queue.length === 0 ? <p className={autoplayError ? "queue-message queue-error" : "queue-message"} role={autoplayError ? "alert" : "status"}>{autoplayError ?? autoplayMessage ?? (autoplay?.items.length ? "Related autoplay ready" : "Preparing related autoplay…")}</p> : <ol className="queue-list">{queue.map((item, index) => <li key={item.id}><span>{String(index + 1).padStart(2, "0")}</span><img src={item.thumbnailUrl} alt="" /><div><strong>{item.title}</strong><small>{item.channelTitle} · {formatTime(item.durationSeconds)}</small></div><div className="queue-item-actions"><button type="button" onClick={() => void next()} disabled={!controlsReady || index !== 0 || isQueueUpdating}>Play</button><button type="button" onClick={() => void removeFromQueue(item.id)} disabled={phase !== "ready" || isQueueUpdating} aria-label={`Remove ${item.title} from queue`}>Remove</button></div></li>)}</ol>}</section>
+      <section className="queue-card" aria-labelledby="queue-title"><header><div><span>COLLABORATIVE QUEUE</span><h2 id="queue-title">Up next</h2></div><strong>{queue.length} {queue.length === 1 ? "video" : "videos"}</strong></header>{queueError ? <p className="queue-message queue-error" role="alert">{queueError}</p> : queue.length === 0 ? <p className={autoplayError ? "queue-message queue-error" : "queue-message"} role={autoplayError ? "alert" : "status"}>{autoplayError ?? autoplayMessage ?? (autoplay?.items.length ? `${autoplay.items.length} related ${autoplay.items.length === 1 ? "track" : "tracks"} ready` : "Preparing related autoplay…")}</p> : <ol className="queue-list">{queue.map((item, index) => <li key={item.id}><span>{String(index + 1).padStart(2, "0")}</span><img src={item.thumbnailUrl} alt="" /><div><strong>{item.title}</strong><small>{item.channelTitle} · {formatTime(item.durationSeconds)}</small></div><div className="queue-item-actions"><button type="button" onClick={() => void next()} disabled={!controlsReady || index !== 0 || isQueueUpdating}>Play</button><button type="button" onClick={() => void removeFromQueue(item.id)} disabled={phase !== "ready" || isQueueUpdating} aria-label={`Remove ${item.title} from queue`}>Remove</button></div></li>)}</ol>}</section>
       </div>
       {surfOpen && <section ref={surfPanelRef} className="surf-panel" id="surf-results" aria-labelledby="surf-title">
         <header><div><span>YOUTUBE DISCOVERY</span><h2 id="surf-title">Choose what plays next</h2></div><button type="button" onClick={() => setSurfOpen(false)} aria-label="Close YouTube discovery">Close</button></header>
