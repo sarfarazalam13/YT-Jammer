@@ -7,18 +7,21 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "node scripts/run-e2e.mjs",
+    "verify": "pnpm test && pnpm build && pnpm test:e2e"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
     "firebase": "latest",
-    "vite": "latest",
-    "typescript": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "react-youtube": "latest"
+    "react-youtube": "latest",
+    "typescript": "latest",
+    "vite": "latest"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "vitest": "latest"

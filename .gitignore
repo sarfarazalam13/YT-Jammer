@@ -4,6 +4,8 @@ dist
 .DS_Store
 *.local
 *.log
+playwright-report
+test-results
 .env
 .env.*
 !.env.example

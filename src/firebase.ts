@@ -1,4 +1,5 @@
 import { getApp, getApps, initializeApp, type FirebaseApp } from "firebase/app";
+import { initializeAppCheck, ReCaptchaV3Provider } from "firebase/app-check";
 import { getAuth, signInAnonymously, type Auth, type User } from "firebase/auth";
 import { getDatabase, type Database } from "firebase/database";
 
@@ -35,6 +36,21 @@ function createFirebaseSetup(): FirebaseSetup {
 
   try {
     const app = getApps().length > 0 ? getApp() : initializeApp(config);
+    const appCheckSiteKey = (import.meta.env.VITE_FIREBASE_APP_CHECK_SITE_KEY ?? "").trim();
+    if (appCheckSiteKey && !appCheckSiteKey.startsWith("your-")) {
+      const runtime = globalThis as typeof globalThis & { __ytJamAppCheckInitialized?: boolean };
+      if (!runtime.__ytJamAppCheckInitialized) {
+        try {
+          initializeAppCheck(app, {
+          provider: new ReCaptchaV3Provider(appCheckSiteKey),
+          isTokenAutoRefreshEnabled: true,
+          });
+          runtime.__ytJamAppCheckInitialized = true;
+        } catch (error) {
+          console.warn("Firebase App Check could not be initialized.", error);
+        }
+      }
+    }
     return {
       services: {
         app,
