@@ -29,9 +29,9 @@ npx firebase-tools deploy --only database
 3. Restrict the key to **YouTube Data API v3** and restrict websites to the exact development and production referrers that may use it, such as `http://localhost:5173/*`.
 4. Add the key as `VITE_YOUTUBE_API_KEY` in `.env.local`, then restart Vite.
 
-The browser key is visible to visitors by design, so referrer and API restrictions are required. Surf searches automatically after a short typing pause, loads additional pages as the user scrolls, and keeps a short session cache to conserve quota. A missing, invalid, restricted, or quota-exhausted key disables discovery with an actionable message but does not interrupt room playback.
+The browser key is visible to visitors by design, so referrer and API restrictions are required. Surf searches automatically after a 1.5-second pause once at least three characters are present. Results are cached locally for 24 hours, each browser is limited to 15 uncached searches per Pacific day, and pagination is capped at three pages per query. HTTP 429 responses start a persisted cooldown instead of a retry loop. Popular music, direct video links, and public playlist imports use official non-search endpoints and remain available when only the search allowance is exhausted.
 
-When the shared queue ends, YT Jam searches for an unplayed video using the current title and channel as a relevance seed, then publishes the winner through the same Firebase advance claim used by the queue. This is a related autoplay mix rather than YouTube's private recommendation system; the public `relatedToVideoId` API was removed in 2023.
+When the shared queue ends, YT Jam uses cached related results, the app-wide most-played chart, and region-aware Popular music before spending another search. It publishes the winner through the same Firebase advance claim used by the queue. The global chart counts each confirmed shared track start once and stores only video IDs plus YT Jam play counters; display metadata is refreshed through `videos.list`.
 
 ## Run locally
 
@@ -40,7 +40,7 @@ pnpm install
 pnpm dev
 ```
 
-Open the local URL, create a room, and copy its invite link into a second independent browser session. Each connected browser appears in the participant strip; the first participant becomes host, and another participant takes over automatically when the host disconnects. Open **Surf YouTube** to browse popular videos or type to search continuously, then play a result or add it to the queue. Click **Enable playback** once in each browser to use the shared timeline, ±10 second skips, speed, Next, and play/pause. Volume, mute, fullscreen, and Video/Mini player display mode remain local to each browser and persist across reloads.
+Open the local URL, create a room, and copy its invite link into a second independent browser session. Each connected browser appears in the participant strip; the first participant becomes host, and another participant takes over automatically when the host disconnects. Open **Surf YouTube** to browse Popular music, search, or paste a YouTube video/public-playlist link, then play a result or add it to the queue. Click **Join the JAM** once in each browser to enable sound and use the shared timeline, ±10 second skips, speed, Next, and play/pause. Volume, mute, fullscreen, and Video/Mini player display mode remain local to each browser and persist across reloads.
 
 Mini player mode is an audio-style layout, but the YouTube player remains visible at 200×200 or larger to comply with YouTube API policies. The app does not separate audio from video or provide hidden background playback.
 

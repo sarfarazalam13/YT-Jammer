@@ -12,10 +12,14 @@ import {
   isTrustedYouTubeThumbnail,
   parsePlaybackState,
   parseAutoplayBuffer,
+  parsePlaybackFallback,
   parseParticipants,
   parseQueue,
+  parseTopSongs,
+  resolvePlayerErrorTarget,
   shouldSeek,
   selectAutoplayVideos,
+  selectAdvanceCandidate,
   type PlaybackState,
 } from "./sync";
 
@@ -68,6 +72,22 @@ describe("playback synchronization helpers", () => {
     expect(isOwnLatestCommand(state, "command-1")).toBe(true);
     expect(isOwnLatestCommand(state, "command-2")).toBe(false);
     expect(isOwnLatestCommand(state, null)).toBe(false);
+  });
+
+  it("attributes an immediate player error to the pending video when YouTube still reports the previous video", () => {
+    expect(resolvePlayerErrorTarget(
+      { commandId: "new-command", videoId: "K9R7KcaettM" },
+      { commandId: "new-command", videoId: "K9R7KcaettM" },
+      "C9OmyNRyz4E",
+    )).toEqual({ commandId: "new-command", videoId: "K9R7KcaettM" });
+  });
+
+  it("ignores an unrelated stale player error when no video load is pending", () => {
+    expect(resolvePlayerErrorTarget(
+      null,
+      { commandId: "current-command", videoId: "K9R7KcaettM" },
+      "C9OmyNRyz4E",
+    )).toBeNull();
   });
 
   it("extracts ids from supported YouTube links", () => {
@@ -161,6 +181,42 @@ describe("playback synchronization helpers", () => {
     })?.items).toEqual([]);
   });
 
+  it("parses and orders a bounded playback fallback", () => {
+    const parsed = parsePlaybackFallback({
+      forCommandId: "command-new",
+      sourceVideoId: VIDEO_ID,
+      createdAt: 100,
+      createdBy: "user-1",
+      items: {
+        "1": { ...fallbackVideo(LEGACY_VIDEO_ID), rank: 1 },
+        "0": { ...fallbackVideo("aqz-KE-bpKQ"), rank: 0 },
+        invalid: { ...fallbackVideo("jNQXAC9IVRw"), rank: 9 },
+      },
+    });
+    expect(parsed?.items.map((item) => item.videoId)).toEqual(["aqz-KE-bpKQ", LEGACY_VIDEO_ID]);
+    expect(parsePlaybackFallback({ forCommandId: "command-new" })).toBeNull();
+  });
+
+  it("prioritizes the visible queue and ignores stale playback fallbacks", () => {
+    const queueItem = { id: "queued", ...fallbackVideo(LEGACY_VIDEO_ID), addedAt: 10, addedBy: "user-1" };
+    const fallback = {
+      forCommandId: state.commandId,
+      sourceVideoId: state.videoId,
+      createdAt: 10,
+      createdBy: "user-1",
+      items: [{ id: "0", ...fallbackVideo("aqz-KE-bpKQ"), rank: 0 }],
+    };
+    const autoplayBuffer = {
+      seedVideoId: state.videoId,
+      generatedAt: 10,
+      generatedBy: "host-1",
+      items: [{ id: "0", ...fallbackVideo("jNQXAC9IVRw"), rank: 0 }],
+    };
+    expect(selectAdvanceCandidate([queueItem], fallback, autoplayBuffer, state)?.source).toBe("queue");
+    expect(selectAdvanceCandidate([], fallback, autoplayBuffer, state)?.source).toBe("fallback");
+    expect(selectAdvanceCandidate([], { ...fallback, forCommandId: "stale" }, autoplayBuffer, state)?.source).toBe("autoplay");
+  });
+
   it("selects five unique autoplay videos while respecting exclusions", () => {
     const videos = [
       fallbackVideo(VIDEO_ID),
@@ -180,5 +236,14 @@ describe("playback synchronization helpers", () => {
       "9bZkp7q19f0",
       "kJQP7kiw5Fk",
     ]);
+  });
+
+  it("parses and ranks global top songs while rejecting malformed entries", () => {
+    const parsed = parseTopSongs({
+      [VIDEO_ID]: { videoId: VIDEO_ID, playCount: 2, lastPlayedAt: 200, lastCommandId: "two", lastRoomId: "room-two" },
+      [LEGACY_VIDEO_ID]: { videoId: LEGACY_VIDEO_ID, playCount: 4, lastPlayedAt: 100, lastCommandId: "one", lastRoomId: "room-one" },
+      invalid: { videoId: "invalid", playCount: 99 },
+    });
+    expect(parsed.map((song) => song.videoId)).toEqual([LEGACY_VIDEO_ID, VIDEO_ID]);
   });
 });

@@ -4,6 +4,7 @@
     ".write": false,
     "rooms": {
       "$roomId": {
+        ".validate": "!newData.child('playbackFallback').exists() ? (!data.child('playbackFallback').exists() || (newData.child('playback').child('updatedBy').val() === auth.uid && (newData.child('playback').child('videoId').val() === data.child('playbackFallback').child('items').child('0').child('videoId').val() || newData.child('playback').child('videoId').val() !== data.child('playbackFallback').child('sourceVideoId').val()))) : ((data.child('playbackFallback').exists() && newData.child('playbackFallback').child('forCommandId').val() === data.child('playbackFallback').child('forCommandId').val() && newData.child('playbackFallback').child('sourceVideoId').val() === data.child('playbackFallback').child('sourceVideoId').val() && newData.child('playbackFallback').child('createdBy').val() === data.child('playbackFallback').child('createdBy').val() && newData.child('playbackFallback').child('createdAt').val() === data.child('playbackFallback').child('createdAt').val()) || (newData.child('playback').child('updatedBy').val() === auth.uid && newData.child('playback').child('commandId').val() === newData.child('playbackFallback').child('forCommandId').val() && newData.child('playback').child('videoId').val() === newData.child('playbackFallback').child('sourceVideoId').val()))",
         "playback": {
           ".read": "auth != null && $roomId.matches(/^[a-z0-9-]{4,32}$/)",
           ".write": "auth != null && $roomId.matches(/^[a-z0-9-]{4,32}$/) && newData.child('updatedBy').val() === auth.uid",
@@ -120,6 +121,52 @@
             ".validate": false
           }
         },
+        "playbackFallback": {
+          ".read": "auth != null && $roomId.matches(/^[a-z0-9-]{4,32}$/)",
+          ".write": "auth != null && $roomId.matches(/^[a-z0-9-]{4,32}$/) && ((!newData.exists() && data.exists()) || (newData.exists() && newData.child('createdBy').val() === auth.uid))",
+          ".validate": "!newData.exists() || newData.hasChildren(['forCommandId', 'sourceVideoId', 'createdAt', 'createdBy', 'items'])",
+          "forCommandId": {
+            ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 128"
+          },
+          "sourceVideoId": {
+            ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{11}$/)"
+          },
+          "createdAt": {
+            ".validate": "newData.isNumber() && newData.val() <= now + 10000"
+          },
+          "createdBy": {
+            ".validate": "newData.isString() && newData.val() === auth.uid"
+          },
+          "items": {
+            "$itemId": {
+              ".validate": "$itemId.matches(/^[0-4]$/) && newData.hasChildren(['videoId', 'title', 'channelTitle', 'thumbnailUrl', 'durationSeconds', 'rank']) && (($itemId === '0' && newData.child('rank').val() === 0) || ($itemId === '1' && newData.child('rank').val() === 1) || ($itemId === '2' && newData.child('rank').val() === 2) || ($itemId === '3' && newData.child('rank').val() === 3) || ($itemId === '4' && newData.child('rank').val() === 4))",
+              "videoId": {
+                ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{11}$/)"
+              },
+              "title": {
+                ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 200"
+              },
+              "channelTitle": {
+                ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 120"
+              },
+              "thumbnailUrl": {
+                ".validate": "newData.isString() && newData.val().matches(/^https:\\/\\/(i\\.ytimg\\.com|img\\.youtube\\.com)\\//) && newData.val().length <= 500"
+              },
+              "durationSeconds": {
+                ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 86400"
+              },
+              "rank": {
+                ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 4"
+              },
+              "$other": {
+                ".validate": false
+              }
+            }
+          },
+          "$other": {
+            ".validate": false
+          }
+        },
         "participants": {
           ".read": "auth != null && $roomId.matches(/^[a-z0-9-]{4,32}$/)",
           "$uid": {
@@ -154,6 +201,32 @@
           "$other": {
             ".validate": false
           }
+        }
+      }
+    },
+    "topSongs": {
+      ".read": "auth != null",
+      ".indexOn": ["playCount"],
+      "$videoId": {
+        ".write": "auth != null && newData.child('lastRoomId').val().matches(/^[a-z0-9-]{4,32}$/) && root.child('rooms').child(newData.child('lastRoomId').val()).child('hostId').val() === auth.uid && root.child('rooms').child(newData.child('lastRoomId').val()).child('playback').child('videoId').val() === $videoId && root.child('rooms').child(newData.child('lastRoomId').val()).child('playback').child('commandId').val() === newData.child('lastCommandId').val() && root.child('rooms').child(newData.child('lastRoomId').val()).child('playback').child('status').val() === 'playing' && root.child('rooms').child(newData.child('lastRoomId').val()).child('playback').child('position').val() <= 5 && ((!data.exists() && newData.child('playCount').val() === 1) || (data.exists() && newData.child('playCount').val() === data.child('playCount').val() + 1 && newData.child('lastCommandId').val() !== data.child('lastCommandId').val()))",
+        ".validate": "newData.hasChildren(['videoId', 'playCount', 'lastPlayedAt', 'lastCommandId', 'lastRoomId'])",
+        "videoId": {
+          ".validate": "newData.isString() && newData.val() === $videoId && newData.val().matches(/^[A-Za-z0-9_-]{11}$/)"
+        },
+        "playCount": {
+          ".validate": "newData.isNumber() && newData.val() >= 1"
+        },
+        "lastPlayedAt": {
+          ".validate": "newData.isNumber() && newData.val() >= now - 60000 && newData.val() <= now + 10000"
+        },
+        "lastCommandId": {
+          ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 128"
+        },
+        "lastRoomId": {
+          ".validate": "newData.isString() && newData.val().matches(/^[a-z0-9-]{4,32}$/)"
+        },
+        "$other": {
+          ".validate": false
         }
       }
     }

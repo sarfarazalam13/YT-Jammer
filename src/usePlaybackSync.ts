@@ -4,7 +4,10 @@ import {
   get,
   onDisconnect,
   onValue,
+  limitToLast,
+  orderByChild,
   push,
+  query,
   ref,
   remove,
   runTransaction,
@@ -20,15 +23,20 @@ import {
   fallbackVideo,
   parsePlaybackState,
   parseAutoplayBuffer,
+  parsePlaybackFallback,
   parseParticipants,
   parseQueue,
+  parseTopSongs,
   playbackVideo,
+  selectAdvanceCandidate,
   type PlaybackState,
   type PlaybackStatus,
   type Participant,
   type QueueItem,
   type YouTubeVideo,
   type AutoplayBuffer,
+  type PlaybackFallback,
+  type TopSong,
 } from "./sync";
 
 export type SyncPhase =
@@ -42,7 +50,8 @@ export type SyncPhase =
   | "error";
 
 type PublishResult = { ok: true; commandId: string } | { ok: false; commandId: null };
-type PublishOptions = { video?: YouTubeVideo; rate?: number };
+type PublishOptions = { video?: YouTubeVideo; rate?: number; fallbackVideos?: YouTubeVideo[] };
+export type AdvanceSource = "queue" | "fallback" | "autoplay";
 
 export function usePlaybackSync(roomId: string | null) {
   const [uid, setUid] = useState<string | null>(null);
@@ -60,17 +69,22 @@ export function usePlaybackSync(roomId: string | null) {
   const [presenceError, setPresenceError] = useState<string | null>(null);
   const [autoplay, setAutoplay] = useState<AutoplayBuffer | null>(null);
   const [autoplayError, setAutoplayError] = useState<string | null>(null);
+  const [playbackFallback, setPlaybackFallback] = useState<PlaybackFallback | null>(null);
+  const [topSongs, setTopSongs] = useState<TopSong[]>([]);
+  const [topSongsError, setTopSongsError] = useState<string | null>(null);
   const playbackRef = useRef<DatabaseReference | null>(null);
   const queueRef = useRef<DatabaseReference | null>(null);
   const roomRef = useRef<DatabaseReference | null>(null);
   const advanceClaimRef = useRef<DatabaseReference | null>(null);
   const autoplayRef = useRef<DatabaseReference | null>(null);
+  const playbackFallbackRef = useRef<DatabaseReference | null>(null);
 
   useEffect(() => {
     playbackRef.current = null;
     roomRef.current = null;
     advanceClaimRef.current = null;
     autoplayRef.current = null;
+    playbackFallbackRef.current = null;
     setUid(null);
     setConnected(null);
     setRemoteState(null);
@@ -84,6 +98,9 @@ export function usePlaybackSync(roomId: string | null) {
     setPresenceError(null);
     setAutoplay(null);
     setAutoplayError(null);
+    setPlaybackFallback(null);
+    setTopSongs([]);
+    setTopSongsError(null);
 
     if (!firebaseSetup.services || !roomId) return;
 
@@ -114,12 +131,14 @@ export function usePlaybackSync(roomId: string | null) {
         const roomParticipantsRef = ref(database, `rooms/${roomId}/participants`);
         const roomHostRef = ref(database, `rooms/${roomId}/hostId`);
         const roomAutoplayRef = ref(database, `rooms/${roomId}/autoplay`);
+        const globalTopSongsRef = ref(database, "topSongs");
         const ownParticipantRef = child(roomParticipantsRef, user.uid);
         playbackRef.current = roomPlaybackRef;
         roomRef.current = currentRoomRef;
         advanceClaimRef.current = child(currentRoomRef, "advanceClaim");
         queueRef.current = roomQueueRef;
         autoplayRef.current = roomAutoplayRef;
+        playbackFallbackRef.current = child(currentRoomRef, "playbackFallback");
         participantReference = ownParticipantRef;
         hostReference = roomHostRef;
 
@@ -255,6 +274,15 @@ export function usePlaybackSync(roomId: string | null) {
             },
           ),
           onValue(
+            child(currentRoomRef, "playbackFallback"),
+            (snapshot) => {
+              if (active) setPlaybackFallback(parsePlaybackFallback(snapshot.val()));
+            },
+            () => {
+              if (active) setPlaybackFallback(null);
+            },
+          ),
+          onValue(
             roomParticipantsRef,
             (snapshot) => {
               if (!active) return;
@@ -272,6 +300,20 @@ export function usePlaybackSync(roomId: string | null) {
               if (!currentHostId) void claimHost();
             },
             reportPresenceError,
+          ),
+          onValue(
+            query(globalTopSongsRef, orderByChild("playCount"), limitToLast(20)),
+            (snapshot) => {
+              if (!active) return;
+              setTopSongs(parseTopSongs(snapshot.val()));
+              setTopSongsError(null);
+            },
+            (error) => {
+              if (!active) return;
+              setTopSongsError(error.message.includes("permission_denied")
+                ? "Publish the latest database.rules.json to enable global recommendations."
+                : `Global recommendations failed: ${error.message}`);
+            },
           ),
         );
 
@@ -291,6 +333,7 @@ export function usePlaybackSync(roomId: string | null) {
       roomRef.current = null;
       advanceClaimRef.current = null;
       autoplayRef.current = null;
+      playbackFallbackRef.current = null;
       queueRef.current = null;
       unsubscribers.forEach((unsubscribe) => unsubscribe());
       void participantDisconnect?.cancel().catch(() => undefined);
@@ -320,7 +363,7 @@ export function usePlaybackSync(roomId: string | null) {
       setRuntimeError(null);
 
       try {
-        await set(playbackRef.current, {
+        const playbackRecord = {
           ...video,
           status,
           position: Math.max(0, position),
@@ -328,7 +371,25 @@ export function usePlaybackSync(roomId: string | null) {
           updatedAt: serverTimestamp(),
           updatedBy: uid,
           commandId,
-        });
+        };
+        if (options.video && roomRef.current) {
+          const excluded = new Set([video.videoId]);
+          const fallbacks = (options.fallbackVideos ?? []).filter((candidate) => {
+            if (excluded.has(candidate.videoId)) return false;
+            excluded.add(candidate.videoId);
+            return true;
+          }).slice(0, 5);
+          const playbackFallback = fallbacks.length > 0 ? {
+            forCommandId: commandId,
+            sourceVideoId: video.videoId,
+            createdAt: serverTimestamp(),
+            createdBy: uid,
+            items: Object.fromEntries(fallbacks.map((candidate, rank) => [String(rank), { ...candidate, rank }])),
+          } : null;
+          await update(roomRef.current, { playback: playbackRecord, playbackFallback });
+        } else {
+          await set(playbackRef.current, playbackRecord);
+        }
         return { ok: true, commandId };
       } catch (error) {
         setRuntimeError(
@@ -366,8 +427,52 @@ export function usePlaybackSync(roomId: string | null) {
     [connected, uid],
   );
 
+  const addManyToQueue = useCallback(
+    async (videos: YouTubeVideo[]): Promise<number> => {
+      if (!queueRef.current || !uid || connected !== true || videos.length === 0) return 0;
+      setIsQueueUpdating(true);
+      setQueueError(null);
+      try {
+        const additions: Record<string, unknown> = {};
+        videos.slice(0, 50).forEach((video) => {
+          const itemRef = push(queueRef.current!);
+          if (!itemRef.key) return;
+          additions[itemRef.key] = { ...video, addedAt: serverTimestamp(), addedBy: uid };
+        });
+        await update(queueRef.current, additions);
+        return Object.keys(additions).length;
+      } catch (error) {
+        setQueueError(error instanceof Error ? `Could not import playlist: ${error.message}` : "Could not import playlist.");
+        return 0;
+      } finally {
+        setIsQueueUpdating(false);
+      }
+    },
+    [connected, uid],
+  );
+
+  const recordPlay = useCallback(
+    async (state: PlaybackState): Promise<boolean> => {
+      if (!firebaseSetup.services || !roomId || !uid || uid !== hostId || connected !== true) return false;
+      if (state.status !== "playing" || state.position > 5) return false;
+      const songRef = ref(firebaseSetup.services.database, `topSongs/${state.videoId}`);
+      try {
+        const result = await runTransaction(songRef, (current) => {
+          if (current && typeof current === "object" && current.lastCommandId === state.commandId) return;
+          const count = current && typeof current === "object" && Number.isInteger(current.playCount) ? current.playCount : 0;
+          return { videoId: state.videoId, playCount: count + 1, lastPlayedAt: serverTimestamp(), lastCommandId: state.commandId, lastRoomId: roomId };
+        }, { applyLocally: false });
+        return result.committed;
+      } catch (error) {
+        setTopSongsError(error instanceof Error ? `Could not update global recommendations: ${error.message}` : "Could not update global recommendations.");
+        return false;
+      }
+    },
+    [connected, hostId, roomId, uid],
+  );
+
   const advancePlayback = useCallback(
-    async (fromCommandId: string): Promise<boolean> => {
+    async (fromCommandId: string): Promise<AdvanceSource | false> => {
       if (
         !roomRef.current || !advanceClaimRef.current ||
         !uid || connected !== true || !remoteState
@@ -387,20 +492,21 @@ export function usePlaybackSync(roomId: string | null) {
         );
         if (!claim.committed) return false;
 
-        if (!playbackRef.current || !queueRef.current || !autoplayRef.current) return false;
-        const [playbackSnapshot, queueSnapshot, autoplaySnapshot] = await Promise.all([
+        if (!playbackRef.current || !queueRef.current || !autoplayRef.current || !playbackFallbackRef.current) return false;
+        const [playbackSnapshot, queueSnapshot, fallbackSnapshot, autoplaySnapshot] = await Promise.all([
           get(playbackRef.current),
           get(queueRef.current),
+          get(playbackFallbackRef.current),
           get(autoplayRef.current),
         ]);
         const currentPlayback = parsePlaybackState(playbackSnapshot.val());
         if (!currentPlayback || currentPlayback.commandId !== fromCommandId) return false;
         const latestQueue = parseQueue(queueSnapshot.val());
+        const latestFallback = parsePlaybackFallback(fallbackSnapshot.val());
         const latestAutoplay = parseAutoplayBuffer(autoplaySnapshot.val());
-        const queueItem = latestQueue[0];
-        const autoplayItem = latestAutoplay?.items[0];
-        const item = queueItem ?? autoplayItem;
-        if (!item) return false;
+        const candidate = selectAdvanceCandidate(latestQueue, latestFallback, latestAutoplay, currentPlayback);
+        if (!candidate) return false;
+        const { item, source } = candidate;
 
         const commandId = crypto.randomUUID();
         const nextPlayback = {
@@ -411,24 +517,18 @@ export function usePlaybackSync(roomId: string | null) {
           durationSeconds: item.durationSeconds,
           status: "playing",
           position: 0,
-          rate: remoteState.rate,
+          rate: currentPlayback.rate,
           updatedAt: serverTimestamp(),
           updatedBy: uid,
           commandId,
         };
 
-        if (queueItem) {
-          await update(roomRef.current, {
-            playback: nextPlayback,
-            [`queue/${item.id}`]: null,
-          });
-        } else {
-          await update(roomRef.current, { playback: nextPlayback });
-          if (autoplayRef.current) {
-            void remove(child(autoplayRef.current, `items/${item.id}`)).catch(() => undefined);
-          }
-        }
-        return true;
+        const updates: Record<string, unknown> = { playback: nextPlayback };
+        if (source === "queue") updates[`queue/${item.id}`] = null;
+        if (source === "fallback") updates.playbackFallback = null;
+        if (source === "autoplay") updates[`autoplay/items/${item.id}`] = null;
+        await update(roomRef.current, updates);
+        return source;
       } catch (error) {
         setQueueError(
           error instanceof Error ? `Could not advance playback: ${error.message}` : "Could not advance playback.",
@@ -507,13 +607,18 @@ export function usePlaybackSync(roomId: string | null) {
     queueError,
     isQueueUpdating,
     addToQueue,
+    addManyToQueue,
     removeFromQueue,
     advancePlayback,
     autoplay,
+    playbackFallback,
     autoplayError,
     replaceAutoplay,
     participants,
     hostId,
     presenceError,
+    topSongs,
+    topSongsError,
+    recordPlay,
   };
 }

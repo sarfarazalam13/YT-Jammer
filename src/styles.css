@@ -245,8 +245,19 @@ button { color: inherit; }
 .surf-message { margin: 18px 0; padding: 18px; border-radius: 12px; background: rgba(255,255,255,.035); color: #8e8997; font-size: 12px; text-align: center; }
 .surf-message code { color: #c6b5ff; }
 .surf-message.surf-error { color: #ff8aa1; background: rgba(255,72,110,.07); }
+.surf-budget { margin: 14px 0 0; color: #9c97a6; font: 500 9px "DM Mono", monospace; line-height: 1.55; }
+.surf-section { margin-top: 18px; padding: 16px; border: 1px solid rgba(190,153,255,.14); border-radius: 16px; background: rgba(154,108,255,.055); }
+.surf-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.surf-section-heading span, .playlist-summary span { color: #b99eff; font: 600 8px "DM Mono", monospace; letter-spacing: .14em; }
+.surf-section-heading h3 { margin: 0; font-size: 16px; }
+.playlist-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 16px 0 4px; padding: 14px 16px; border: 1px solid rgba(255,255,255,.1); border-radius: 14px; background: rgba(255,255,255,.045); }
+.playlist-summary > div { display: flex; align-items: center; gap: 10px; }
+.playlist-summary > div:first-child { display: grid; gap: 4px; }
+.playlist-summary > div:last-child { flex-wrap: wrap; justify-content: flex-end; }
+.playlist-summary button { min-height: 36px; padding: 0 14px; }
 .surf-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .surf-grid article { overflow: hidden; display: grid; grid-template-rows: auto 1fr auto; border: 1px solid rgba(255,255,255,.08); border-radius: 13px; background: rgba(255,255,255,.025); }
+.surf-grid article.is-highlighted { border-color: rgba(190,153,255,.72); box-shadow: 0 0 0 2px rgba(154,108,255,.14); }
 .surf-grid article > img { width: 100%; aspect-ratio: 16 / 9; display: block; object-fit: cover; background: #08080a; }
 .surf-grid article > div:nth-child(2) { display: grid; align-content: start; gap: 5px; padding: 11px 12px; }
 .surf-grid article strong { overflow: hidden; font-size: 11px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
@@ -730,6 +741,8 @@ footer { width: min(1320px, 100%); margin-top: 26px; }
   .join-notice { padding: 24px 20px 20px; }
   .join-notice-actions { grid-template-columns: 1fr; }
   .surf-grid { grid-template-columns: 1fr; }
+  .surf-section-heading, .playlist-summary { align-items: stretch; flex-direction: column; }
+  .playlist-summary > div:last-child { display: grid; grid-template-columns: 1fr 1fr; }
   .queue-card { padding: 19px 15px; }
 }
 

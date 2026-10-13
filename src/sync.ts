@@ -51,10 +51,53 @@ export type AutoplayBuffer = {
   items: AutoplayItem[];
 };
 
+export type PlaybackFallbackItem = YouTubeVideo & {
+  id: string;
+  rank: number;
+};
+
+export type PlaybackFallback = {
+  forCommandId: string;
+  sourceVideoId: string;
+  createdAt: number;
+  createdBy: string;
+  items: PlaybackFallbackItem[];
+};
+
+export type AdvanceCandidate = {
+  source: "queue" | "fallback" | "autoplay";
+  item: QueueItem | PlaybackFallbackItem | AutoplayItem;
+};
+
 export type Participant = {
   uid: string;
   joinedAt: number;
 };
+
+export type TopSong = {
+  videoId: string;
+  playCount: number;
+  lastPlayedAt: number;
+  lastCommandId: string;
+  lastRoomId: string;
+};
+
+export type PlaybackCommandRef = {
+  commandId: string;
+  videoId: string;
+};
+
+export function resolvePlayerErrorTarget(
+  pending: PlaybackCommandRef | null,
+  remote: PlaybackCommandRef | null,
+  loadedVideoId?: string,
+): PlaybackCommandRef | null {
+  // The IFrame API may keep reporting the previous video until a failed
+  // loadVideoById/cueVideoById request has emitted its error event.
+  if (pending) return pending;
+  if (remote && (!loadedVideoId || loadedVideoId === remote.videoId)) return remote;
+  return null;
+}
 
 export function canClaimAdvance(value: unknown, fromCommandId: string, now: number): boolean {
   if (!value || typeof value !== "object") return true;
@@ -241,6 +284,42 @@ export function parseAutoplayBuffer(value: unknown): AutoplayBuffer | null {
   };
 }
 
+export function parsePlaybackFallback(value: unknown): PlaybackFallback | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.forCommandId !== "string" || candidate.forCommandId.length === 0 ||
+    typeof candidate.sourceVideoId !== "string" || !YOUTUBE_VIDEO_ID_PATTERN.test(candidate.sourceVideoId) ||
+    typeof candidate.createdAt !== "number" || !Number.isFinite(candidate.createdAt) ||
+    typeof candidate.createdBy !== "string" || candidate.createdBy.length === 0 ||
+    !candidate.items || typeof candidate.items !== "object"
+  ) return null;
+
+  const items = Object.entries(candidate.items as Record<string, unknown>)
+    .flatMap(([id, rawItem]) => {
+      if (!rawItem || typeof rawItem !== "object") return [];
+      const item = rawItem as Record<string, unknown>;
+      const videoId = String(item.videoId ?? "");
+      if (
+        !YOUTUBE_VIDEO_ID_PATTERN.test(videoId) ||
+        typeof item.rank !== "number" || !Number.isInteger(item.rank) ||
+        item.rank < 0 || item.rank > 4
+      ) return [];
+      return [{ id, ...parseVideoMetadata(item, videoId), rank: item.rank }];
+    })
+    .sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id))
+    .slice(0, 5);
+
+  if (items.length === 0) return null;
+  return {
+    forCommandId: candidate.forCommandId,
+    sourceVideoId: candidate.sourceVideoId,
+    createdAt: candidate.createdAt,
+    createdBy: candidate.createdBy,
+    items,
+  };
+}
+
 export function selectAutoplayVideos(
   videos: YouTubeVideo[],
   excludedVideoIds: ReadonlySet<string>,
@@ -255,6 +334,22 @@ export function selectAutoplayVideos(
     if (selected.length >= limit) break;
   }
   return selected;
+}
+
+export function selectAdvanceCandidate(
+  queue: QueueItem[],
+  fallback: PlaybackFallback | null,
+  autoplay: AutoplayBuffer | null,
+  playback: Pick<PlaybackState, "commandId" | "videoId">,
+): AdvanceCandidate | null {
+  if (queue[0]) return { source: "queue", item: queue[0] };
+  if (
+    fallback?.forCommandId === playback.commandId &&
+    fallback.sourceVideoId === playback.videoId &&
+    fallback.items[0]
+  ) return { source: "fallback", item: fallback.items[0] };
+  if (autoplay?.items[0]) return { source: "autoplay", item: autoplay.items[0] };
+  return null;
 }
 
 export function parseParticipants(value: unknown): Participant[] {
@@ -274,6 +369,25 @@ export function parseParticipants(value: unknown): Participant[] {
       return [{ uid, joinedAt: participant.joinedAt }];
     })
     .sort((a, b) => a.joinedAt - b.joinedAt || a.uid.localeCompare(b.uid));
+}
+
+export function parseTopSongs(value: unknown): TopSong[] {
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value as Record<string, unknown>)
+    .flatMap(([videoId, raw]) => {
+      if (!YOUTUBE_VIDEO_ID_PATTERN.test(videoId) || !raw || typeof raw !== "object") return [];
+      const item = raw as Record<string, unknown>;
+      if (
+        item.videoId !== videoId ||
+        typeof item.playCount !== "number" || !Number.isInteger(item.playCount) || item.playCount < 1 ||
+        typeof item.lastPlayedAt !== "number" || !Number.isFinite(item.lastPlayedAt) ||
+        typeof item.lastCommandId !== "string" || !item.lastCommandId ||
+        typeof item.lastRoomId !== "string" || !item.lastRoomId
+      ) return [];
+      return [{ videoId, playCount: item.playCount, lastPlayedAt: item.lastPlayedAt, lastCommandId: item.lastCommandId, lastRoomId: item.lastRoomId }];
+    })
+    .sort((a, b) => b.playCount - a.playCount || b.lastPlayedAt - a.lastPlayedAt)
+    .slice(0, 20);
 }
 
 export function expectedPosition(state: PlaybackState, serverNowMs: number): number {
