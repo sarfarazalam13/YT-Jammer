@@ -1,7 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import YouTube, { type YouTubeEvent, type YouTubePlayer } from "react-youtube";
 import { createRoomId, isValidRoomId, normalizeRoomId, roomIdFromSearch, roomUrl } from "./rooms";
-import { PLAYBACK_RATES, VIDEO_ID, clampPosition, expectedPosition, formatTime, isOwnLatestCommand, playbackVideo, selectAutoplayVideos, shouldSeek, type PlaybackState, type YouTubeVideo } from "./sync";
+import { LEGACY_VIDEO_ID, PLAYBACK_RATES, VIDEO_ID, clampPosition, expectedPosition, formatTime, isOwnLatestCommand, playbackVideo, selectAutoplayVideos, shouldSeek, type PlaybackState, type YouTubeVideo } from "./sync";
 import { type SyncPhase, usePlaybackSync } from "./usePlaybackSync";
 import { browserRegion, fetchYouTubeVideoPage, youtubeApiKey } from "./youtube";
 import { readPlayerPreferences, writePlayerPreferences } from "./preferences";
@@ -9,6 +9,26 @@ import { readPlayerPreferences, writePlayerPreferences } from "./preferences";
 type PlayerStatus = "loading" | "ready" | "playing" | "paused" | "ended";
 type PlayerMode = "video" | "compact";
 type SurfStatus = "idle" | "loading" | "ready" | "error";
+const AUTOPLAY_CATALOG_VERSION = "syndicated-v1";
+const REJECTED_VIDEO_IDS_KEY = "yt-jam:rejected-video-ids";
+
+function readRejectedVideoIds(storage: Storage): Set<string> {
+  try {
+    const parsed = JSON.parse(storage.getItem(REJECTED_VIDEO_IDS_KEY) ?? "[]") as unknown;
+    return new Set(Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function rememberRejectedVideoId(storage: Storage, videoIds: Set<string>, videoId: string): void {
+  videoIds.add(videoId);
+  try {
+    storage.setItem(REJECTED_VIDEO_IDS_KEY, JSON.stringify([...videoIds]));
+  } catch {
+    // Playback recovery still works when session storage is unavailable.
+  }
+}
 
 const phaseLabels: Record<SyncPhase, string> = { idle: "Choose room", configuration: "Setup needed", authenticating: "Signing in", connecting: "Connecting", ready: "Synced", syncing: "Syncing", offline: "Offline", error: "Sync error" };
 function PlayIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.4v13.2L18.5 12 8 5.4Z" /></svg>; }
@@ -47,12 +67,19 @@ function App() {
   const lastAppliedCommandRef = useRef<string | null>(null);
   const latestRemoteRef = useRef<PlaybackState | null>(null);
   const autoplayRequestRef = useRef<string | null>(null);
+  const autoplayValidatedSeedRef = useRef<string | null>(null);
+  const legacyPlaybackMigratedRef = useRef(false);
+  const failedPlaybackCommandRef = useRef<string | null>(null);
+  const rejectedVideoIdsRef = useRef(readRejectedVideoIds(window.sessionStorage));
   const [playerStatus, setPlayerStatus] = useState<PlayerStatus>("loading");
   const [playerReady, setPlayerReady] = useState(false);
   const [playbackEnabled, setPlaybackEnabled] = useState(() => readPlayerPreferences(window.localStorage).playbackEnabled);
   const [audioUnlocked, setAudioUnlocked] = useState(false);
+  const [joinNoticeDismissed, setJoinNoticeDismissed] = useState(false);
   const [isArmingPlayback, setIsArmingPlayback] = useState(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
+  const [playerErrorCode, setPlayerErrorCode] = useState<number | null>(null);
+  const [playerEmbedBlocked, setPlayerEmbedBlocked] = useState(false);
   const [roomId, setRoomId] = useState<string | null>(() => roomIdFromSearch(window.location.search));
   const [copyLabel, setCopyLabel] = useState("Copy invite");
   const [playerMode, setPlayerMode] = useState<PlayerMode>(() => readPlayerPreferences(window.localStorage).mode);
@@ -76,7 +103,12 @@ function App() {
   const currentVideo = remoteState ? playbackVideo(remoteState) : null;
   const controlsReady = playerReady && playbackEnabled && phase === "ready";
 
-  useEffect(() => { latestRemoteRef.current = remoteState; if (remoteState?.videoId) playedVideoIdsRef.current.add(remoteState.videoId); if (remoteState?.status === "playing") setAutoplayMessage(null); }, [remoteState]);
+  useEffect(() => {
+    latestRemoteRef.current = remoteState;
+    if (remoteState?.videoId) playedVideoIdsRef.current.add(remoteState.videoId);
+    if (remoteState?.status === "playing") setAutoplayMessage(null);
+    if (remoteState?.commandId && remoteState.commandId !== failedPlaybackCommandRef.current) { setPlayerError(null); setPlayerErrorCode(null); }
+  }, [remoteState]);
   const enterRoom = useCallback((nextRoomId: string) => { window.history.pushState({ roomId: nextRoomId }, "", roomUrl(nextRoomId, window.location)); setRoomId(nextRoomId); }, []);
   const createRoom = useCallback(() => enterRoom(createRoomId()), [enterRoom]);
   const leaveRoom = useCallback(() => { playerRef.current?.pauseVideo?.(); window.history.pushState({}, "", window.location.pathname); setRoomId(null); }, []);
@@ -85,19 +117,38 @@ function App() {
     setSurfOpen(true);
     setSurfRequest(undefined);
     window.requestAnimationFrame(() => {
-      surfPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
       surfSearchInputRef.current?.focus({ preventScroll: true });
     });
   }, []);
 
   useEffect(() => { const readRoom = () => setRoomId(roomIdFromSearch(window.location.search)); window.addEventListener("popstate", readRoom); return () => window.removeEventListener("popstate", readRoom); }, []);
-  useEffect(() => { playerRef.current = null; lastAppliedCommandRef.current = null; autoplayRequestRef.current = null; setPlayerReady(false); setPlaybackEnabled(readPlayerPreferences(window.localStorage).playbackEnabled); setAudioUnlocked(false); setPlayerStatus("loading"); setPlayerError(null); setPosition(0); setDuration(0); setSurfOpen(false); }, [roomId]);
+  useEffect(() => {
+    playerRef.current = null;
+    lastAppliedCommandRef.current = null;
+    autoplayRequestRef.current = null;
+    autoplayValidatedSeedRef.current = null;
+    legacyPlaybackMigratedRef.current = false;
+    failedPlaybackCommandRef.current = null;
+    setPlayerReady(false);
+    setPlaybackEnabled(readPlayerPreferences(window.localStorage).playbackEnabled);
+    setAudioUnlocked(false);
+    setJoinNoticeDismissed(false);
+    setPlayerStatus("loading");
+    setPlayerError(null);
+    setPlayerErrorCode(null);
+    setPlayerEmbedBlocked(false);
+    setPosition(0);
+    setDuration(0);
+    setSurfOpen(false);
+    return () => {
+      playerRef.current = null;
+    };
+  }, [roomId]);
   useEffect(() => { writePlayerPreferences(window.localStorage, { mode: playerMode, volume, muted, playbackEnabled }); }, [muted, playbackEnabled, playerMode, volume]);
 
   useEffect(() => {
     if (!surfOpen) return;
     const frame = window.requestAnimationFrame(() => {
-      surfPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
       surfSearchInputRef.current?.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
@@ -149,14 +200,15 @@ function App() {
     if (!surfOpen || !sentinel || !surfNextPageToken) return;
     const observer = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.isIntersecting)) void loadMoreSurfVideos();
-    }, { rootMargin: "320px" });
+    }, { root: surfPanelRef.current, rootMargin: "320px" });
     observer.observe(sentinel);
     return () => observer.disconnect();
   }, [loadMoreSurfVideos, surfNextPageToken, surfOpen]);
 
   useEffect(() => {
     if (!remoteState || !uid || uid !== hostId || phase !== "ready") return;
-    if (autoplay?.seedVideoId === remoteState.videoId && autoplay.items.length > 0) return;
+    const validatedSeed = `${remoteState.videoId}:${AUTOPLAY_CATALOG_VERSION}`;
+    if (autoplay?.seedVideoId === remoteState.videoId && autoplay.items.length > 0 && autoplayValidatedSeedRef.current === validatedSeed) return;
     if (autoplayRequestRef.current === remoteState.videoId) return;
     if (!youtubeApiKey) {
       setAutoplayMessage("Related autoplay needs a configured YouTube API key.");
@@ -168,12 +220,14 @@ function App() {
     const query = hasUsefulMetadata ? `${seed.title} ${seed.channelTitle}` : undefined;
     const requestedVideoId = seed.videoId;
     autoplayRequestRef.current = requestedVideoId;
+    autoplayValidatedSeedRef.current = validatedSeed;
     setAutoplayMessage("Preparing related autoplay…");
 
     void (async () => {
       const excluded = new Set<string>([
         requestedVideoId,
         ...playedVideoIdsRef.current,
+        ...rejectedVideoIdsRef.current,
         ...queue.map((item) => item.videoId),
         ...(autoplay?.items.map((item) => item.videoId) ?? []),
       ]);
@@ -212,6 +266,55 @@ function App() {
 
   }, [autoplay, hostId, phase, queue, remoteState, replaceAutoplay, uid]);
 
+  useEffect(() => {
+    if (
+      legacyPlaybackMigratedRef.current ||
+      phase !== "ready" ||
+      !uid || uid !== hostId ||
+      remoteState?.videoId !== LEGACY_VIDEO_ID ||
+      remoteState.title !== "YouTube video"
+    ) return;
+    legacyPlaybackMigratedRef.current = true;
+    void publish("paused", 0, {
+      video: {
+        videoId: VIDEO_ID,
+        title: "Choose a track from Surf YouTube",
+        channelTitle: "YT Jam",
+        thumbnailUrl: `https://i.ytimg.com/vi/${VIDEO_ID}/hqdefault.jpg`,
+        durationSeconds: 0,
+      },
+      rate: 1,
+    });
+  }, [hostId, phase, publish, remoteState, uid]);
+
+  const loadPlayerVideo = useCallback(async (
+    player: YouTubePlayer,
+    videoId: string,
+    startSeconds: number,
+    status: "playing" | "paused",
+    rate: number,
+  ): Promise<boolean> => {
+    if (playerRef.current !== player) return false;
+    try {
+      const request = { videoId, startSeconds };
+      if (status === "playing") await Promise.resolve(player.loadVideoById(request));
+      else await Promise.resolve(player.cueVideoById(request));
+      if (playerRef.current !== player) return false;
+      await Promise.resolve(player.setPlaybackRate?.(rate));
+      return playerRef.current === player;
+    } catch (error) {
+      if (playerRef.current === player) {
+        setPlayerStatus("paused");
+        setPlayerErrorCode(null);
+        setPlayerEmbedBlocked(false);
+        setPlayerError(error instanceof Error
+          ? `Could not switch videos: ${error.message}`
+          : "Could not switch videos. Try the track again.");
+      }
+      return false;
+    }
+  }, []);
+
   const applyRemoteState = useCallback((force = false, allowDisabled = false) => {
     const player = playerRef.current;
     if (!player || !playerReady || (!playbackEnabled && !allowDisabled) || !remoteState) return;
@@ -220,13 +323,20 @@ function App() {
       if (isOwnLatestCommand(remoteState, lastPublishedCommandId)) { lastAppliedCommandRef.current = remoteState.commandId; return; }
     }
     const calculated = expectedPosition(remoteState, Date.now() + serverTimeOffset);
-    const playerDuration = Number(player.getDuration?.() ?? remoteState.durationSeconds ?? 0);
-    const target = clampPosition(calculated, playerDuration);
     const loadedId = player.getVideoData?.()?.video_id;
-    if (loadedId && loadedId !== remoteState.videoId) {
-      const request = { videoId: remoteState.videoId, startSeconds: target };
-      remoteState.status === "playing" ? player.loadVideoById(request) : player.cueVideoById(request);
-      window.setTimeout(() => player.setPlaybackRate?.(remoteState.rate), 120);
+    const playerDuration = Number(player.getDuration?.() ?? 0);
+    const targetDuration = loadedId === remoteState.videoId
+      ? playerDuration || remoteState.durationSeconds
+      : remoteState.durationSeconds;
+    const target = clampPosition(calculated, targetDuration);
+    if (loadedId !== remoteState.videoId) {
+      const commandId = remoteState.commandId;
+      void loadPlayerVideo(player, remoteState.videoId, target, remoteState.status, remoteState.rate).then((loaded) => {
+        if (!loaded || latestRemoteRef.current?.commandId !== commandId) return;
+        setPlayerStatus(remoteState.status);
+        lastAppliedCommandRef.current = commandId;
+      });
+      return;
     } else {
       if (shouldSeek(Number(player.getCurrentTime?.() ?? 0), target)) player.seekTo(target, true);
       player.setPlaybackRate?.(remoteState.rate);
@@ -235,7 +345,7 @@ function App() {
       if (remoteState.status === "paused" && state === 1) player.pauseVideo();
     }
     setPlayerStatus(remoteState.status); lastAppliedCommandRef.current = remoteState.commandId;
-  }, [lastPublishedCommandId, playbackEnabled, playerReady, remoteState, serverTimeOffset]);
+  }, [lastPublishedCommandId, loadPlayerVideo, playbackEnabled, playerReady, remoteState, serverTimeOffset]);
 
   useEffect(() => { applyRemoteState(false); }, [applyRemoteState]);
   useEffect(() => { if (!playbackEnabled || remoteState?.status !== "playing") return; const id = window.setInterval(() => applyRemoteState(true), 5_000); return () => window.clearInterval(id); }, [applyRemoteState, playbackEnabled, remoteState?.status]);
@@ -272,6 +382,7 @@ function App() {
     setPlaybackEnabled(true);
     setAudioUnlocked(true);
     setMuted(false);
+    setJoinNoticeDismissed(true);
     player.setVolume?.(volume);
     player.unMute?.();
     applyRemoteState(true, true);
@@ -282,6 +393,7 @@ function App() {
     playerRef.current?.pauseVideo?.();
     setPlaybackEnabled(false);
     setAudioUnlocked(false);
+    setJoinNoticeDismissed(false);
     setPlayerStatus("paused");
   }, []);
 
@@ -291,7 +403,20 @@ function App() {
   const changeRate = useCallback((rate: number) => { const player = playerRef.current; if (!player || !controlsReady || !remoteState) return; player.setPlaybackRate(rate); void publish(remoteState.status, Number(player.getCurrentTime?.() ?? 0), { rate }); }, [controlsReady, publish, remoteState]);
   const changeVolume = useCallback((nextVolume: number) => { setVolume(nextVolume); playerRef.current?.setVolume?.(nextVolume); if (nextVolume > 0 && muted) { playerRef.current?.unMute?.(); setMuted(false); } }, [muted]);
   const toggleMute = useCallback(() => { const player = playerRef.current; if (!player) return; muted ? player.unMute() : player.mute(); setMuted(!muted); }, [muted]);
-  const playVideo = useCallback((video: YouTubeVideo) => { const player = playerRef.current; if (!player || !controlsReady) return; player.loadVideoById({ videoId: video.videoId, startSeconds: 0 }); player.setPlaybackRate(remoteState?.rate ?? 1); setPlayerStatus("playing"); setPosition(0); setDuration(video.durationSeconds); void publish("playing", 0, { video, rate: remoteState?.rate ?? 1 }); setSurfOpen(false); }, [controlsReady, publish, remoteState?.rate]);
+  const playVideo = useCallback(async (video: YouTubeVideo) => {
+    const player = playerRef.current;
+    if (!player || !controlsReady) return;
+    const rate = remoteState?.rate ?? 1;
+    const result = await publish("playing", 0, { video, rate });
+    if (!result.ok || playerRef.current !== player) return;
+    const loaded = await loadPlayerVideo(player, video.videoId, 0, "playing", rate);
+    if (!loaded || playerRef.current !== player) return;
+    lastAppliedCommandRef.current = result.commandId;
+    setPlayerStatus("playing");
+    setPosition(0);
+    setDuration(video.durationSeconds);
+    setSurfOpen(false);
+  }, [controlsReady, loadPlayerVideo, publish, remoteState?.rate]);
   const next = useCallback(async (fromCommandId = remoteState?.commandId) => { if (!fromCommandId || (queue.length === 0 && !autoplay?.items.length)) return false; return advancePlayback(fromCommandId); }, [advancePlayback, autoplay?.items.length, queue.length, remoteState?.commandId]);
   const onEnded = useCallback(() => {
     setPlayerStatus("ended");
@@ -311,24 +436,81 @@ function App() {
     }).catch(() => setAutoplayMessage("Could not advance automatically. You can try Next again."));
   }, [advancePlayback, autoplay?.items.length, duration, publish, queue.length]);
 
-  const visibleError = syncError ?? playerError;
+  const onPlayerError = useCallback((event: YouTubeEvent) => {
+    if (playerRef.current && event.target !== playerRef.current) return;
+    const errorCode = Number(event.data);
+    setPlayerErrorCode(Number.isFinite(errorCode) ? errorCode : null);
+    if (errorCode === 153) {
+      setPlayerEmbedBlocked(true);
+      setPlayerStatus("paused");
+      setPlayerError("This browser did not send the referrer identity required by YouTube. Reload once; if it continues, open this local URL in Chrome or Edge.");
+      return;
+    }
+
+    const failedState = latestRemoteRef.current;
+    if (!failedState) {
+      setPlayerError("YouTube could not load this video. Choose another track from Surf YouTube.");
+      return;
+    }
+
+    const loadedVideoId = event.target.getVideoData?.()?.video_id;
+    if (loadedVideoId && loadedVideoId !== failedState.videoId) return;
+    if (failedPlaybackCommandRef.current === failedState.commandId) return;
+
+    failedPlaybackCommandRef.current = failedState.commandId;
+    rememberRejectedVideoId(window.sessionStorage, rejectedVideoIdsRef.current, failedState.videoId);
+    playedVideoIdsRef.current.add(failedState.videoId);
+    setPlayerEmbedBlocked(false);
+    setPlayerStatus("paused");
+    const hasNextVideo = queue.length > 0 || Boolean(autoplay?.items.length);
+    const unavailableMessage = errorCode === 101 || errorCode === 150
+      ? "The video owner does not allow this track to play in embedded players."
+      : errorCode === 2
+        ? "YouTube rejected this video ID."
+        : errorCode === 5
+          ? "This browser could not play the video's HTML5 stream."
+          : "YouTube could not play this video in the embedded player.";
+    if (!hasNextVideo) {
+      setPlayerError(`${unavailableMessage} Choose another track from Surf YouTube.`);
+      return;
+    }
+
+    setPlayerError(`${unavailableMessage} Skipping to the next track…`);
+    void advancePlayback(failedState.commandId).then((advanced) => {
+      if (!advanced && latestRemoteRef.current?.commandId === failedState.commandId) {
+        failedPlaybackCommandRef.current = null;
+        setPlayerError(`${unavailableMessage} Use Skip to try the next track.`);
+      }
+    }).catch(() => {
+      failedPlaybackCommandRef.current = null;
+      setPlayerError(`${unavailableMessage} Use Skip to try the next track.`);
+    });
+  }, [advancePlayback, autoplay?.items.length, queue.length]);
+
+  const visibleError = syncError;
   const timelineValue = seekDraft ?? position;
   const timelineMax = Math.max(1, duration || remoteState?.durationSeconds || 0);
   const statusLabel = phase === "ready" ? playerStatus : phaseLabels[phase];
   const remainingTime = Math.max(0, timelineMax - timelineValue);
   const sharedControlHint = controlsReady ? undefined : "Join playback on this device to use this control";
 
-  return <main className="app-shell">
-    <div className="ambient ambient-one" /><div className="ambient ambient-two" />
+  return <main className={`app-shell ${roomId ? "has-room" : ""}`}>
+    {roomId && <div className="music-backdrop" aria-hidden="true">
+      {currentVideo?.thumbnailUrl && <div key={currentVideoId} className="music-backdrop-art" style={{ backgroundImage: `url(${currentVideo.thumbnailUrl})` }} />}
+      <div className="music-backdrop-shade" />
+    </div>}
     <nav className="topbar" aria-label="Primary navigation"><a className="brand" href="#player" aria-label="YT Jam home"><span className="brand-mark"><PlayIcon /></span><span>YT JAM</span></a><div className="room-pill"><span className={`live-dot phase-${phase}`} />{roomId ? `${roomId} · ${phaseLabels[phase]}` : "Choose or create a room"}</div></nav>
-    <section className="hero" aria-labelledby="page-title"><p className="eyebrow">PROOF OF CONCEPT · SURF TOGETHER</p><h1 id="page-title">Find it.<br /><span>Feel it together.</span></h1><p className="lede">{roomId ? "Surf YouTube, shape the queue, and control one shared timeline from every device." : "Create a room, discover a video, and share one perfectly timed moment."}</p></section>
     {roomId && visibleError && <aside className={`notice ${phase === "configuration" ? "notice-setup" : "notice-error"}`} role="alert"><div><span>{phase === "configuration" ? "FIREBASE SETUP REQUIRED" : "CONNECTION ISSUE"}</span><strong>{visibleError}</strong></div>{phase === "configuration" ? <code>Copy .env.example to .env.local</code> : <button type="button" onClick={() => window.location.reload()}>Retry connection</button>}</aside>}
     {roomId && !visibleError && phase === "offline" && <aside className="notice notice-offline" role="status"><div><span>OFFLINE</span><strong>Playback controls will return when this device reconnects. The player will then apply the latest room state.</strong></div></aside>}
+    {roomId && playerError && <aside className="notice notice-player" role="status"><div><span>{playerErrorCode === 153 ? "YOUTUBE EMBED BLOCKED · ERROR 153" : `PLAYBACK UNAVAILABLE${playerErrorCode === null ? "" : ` · ERROR ${playerErrorCode}`}`}</span><strong>{playerError}</strong></div><div className="notice-actions"><a href={`https://www.youtube.com/watch?v=${currentVideoId}`} target="_blank" rel="noreferrer">Open on YouTube</a><button type="button" onClick={() => { if (playerEmbedBlocked) window.location.reload(); else if (queue.length > 0 || autoplay?.items.length) void next(); else openSurf(); }}>{playerEmbedBlocked ? "Retry player" : queue.length > 0 || autoplay?.items.length ? "Skip video" : "Surf YouTube"}</button></div></aside>}
     {!roomId && <RoomLobby onCreate={createRoom} onJoin={enterRoom} />}
     {roomId && <>
-      <section className="room-actions" aria-label="Room invite actions"><div><span>ROOM CODE</span><strong>{roomId}</strong></div><div><button type="button" onClick={openSurf}>Surf YouTube</button><button type="button" onClick={copyInvite}>{copyLabel}</button><button type="button" className="leave-room" onClick={leaveRoom}>Leave room</button></div></section>
-      <section className="presence-card" aria-label="Room participants"><div className="presence-summary"><span className={`role-badge ${uid && uid === hostId ? "is-host" : ""}`}>{uid && uid === hostId ? "HOST" : "GUEST"}</span><div><strong>{participants.length} {participants.length === 1 ? "listener" : "listeners"}</strong><span>{hostId ? "Room host is online" : "Electing a room host…"}</span></div></div><div className="participant-list" aria-label="Connected listeners">{participants.slice(0, 6).map((participant) => <span className={participant.uid === hostId ? "participant is-host" : "participant"} key={participant.uid}><i aria-hidden="true">{participant.uid === hostId ? "★" : "●"}</i>{participant.uid === uid ? "YOU" : `P-${participant.uid.slice(-4).toUpperCase()}`}</span>)}{participants.length > 6 && <span className="participant-more">+{participants.length - 6}</span>}</div>{presenceError && <p role="alert">{presenceError}</p>}</section>
-      {playerReady && phase === "ready" && (!playbackEnabled || !audioUnlocked) && <section className="activation-panel"><div><span>{playbackEnabled ? "SYNCED SILENTLY" : "LOCAL PLAYBACK OFF"}</span><strong>{playbackEnabled ? "You’re following the room in muted mode" : "Playback is disabled on this device"}</strong><p>{playbackEnabled ? "Join the JAM to enable sound and keep listening from the current position." : "You can still browse YouTube and add videos to the shared queue."}</p></div><button type="button" onClick={joinPlayback} disabled={isArmingPlayback}><PlayIcon />{isArmingPlayback ? "Joining…" : "Join the JAM"}</button></section>}
+      <section className="room-header" aria-label="Room controls and participants">
+        <div className="room-actions" aria-label="Room invite actions"><div><span>ROOM CODE</span><strong>{roomId}</strong></div><div><button type="button" onClick={openSurf}>Surf YouTube</button><button type="button" onClick={copyInvite}>{copyLabel}</button><button type="button" className="leave-room" onClick={leaveRoom}>Leave room</button></div></div>
+        <div className="presence-card" aria-label="Room participants"><div className="presence-summary"><span className={`role-badge ${uid && uid === hostId ? "is-host" : ""}`}>{uid && uid === hostId ? "HOST" : "GUEST"}</span><div><strong>{participants.length} {participants.length === 1 ? "listener" : "listeners"}</strong><span>{hostId ? "Room host is online" : "Electing a room host…"}</span></div></div><div className="participant-list" aria-label="Connected listeners">{participants.slice(0, 6).map((participant) => <span className={participant.uid === hostId ? "participant is-host" : "participant"} key={participant.uid}><i aria-hidden="true">{participant.uid === hostId ? "★" : "●"}</i>{participant.uid === uid ? "YOU" : `P-${participant.uid.slice(-4).toUpperCase()}`}</span>)}{participants.length > 6 && <span className="participant-more">+{participants.length - 6}</span>}</div>{presenceError && <p role="alert">{presenceError}</p>}</div>
+      </section>
+      {playerReady && phase === "ready" && (!playbackEnabled || !audioUnlocked) && !joinNoticeDismissed && <div className="join-notice-layer"><section className="join-notice" role="dialog" aria-labelledby="join-notice-title" aria-describedby="join-notice-copy"><span>{playbackEnabled ? "SYNCED SILENTLY" : "LOCAL PLAYBACK OFF"}</span><div className="join-notice-icon"><PlayIcon /></div><strong id="join-notice-title">{playbackEnabled ? "You’re in the room" : "Playback is off here"}</strong><p id="join-notice-copy">{playbackEnabled ? "The room is playing silently. Join the JAM to turn on sound and jump to the live position." : "Rejoin playback from the room’s current position. Browsing and queue controls stay available either way."}</p><div className="join-notice-actions"><button type="button" className="join-primary" onClick={joinPlayback} disabled={isArmingPlayback}><PlayIcon />{isArmingPlayback ? "Joining…" : playbackEnabled ? "Join the JAM" : "Join playback"}</button><button type="button" className="join-secondary" onClick={() => setJoinNoticeDismissed(true)}>Keep muted</button></div></section></div>}
+      <div className="player-workspace">
       <section ref={playerCardRef} className={`player-card mode-${playerMode}`} id="player" aria-label="Synchronized YouTube player controls">
         <div className="track-art-glow" style={currentVideo?.thumbnailUrl ? { backgroundImage: `url(${currentVideo.thumbnailUrl})` } : undefined} aria-hidden="true" />
         <div className="player-toolbar">
@@ -340,7 +522,7 @@ function App() {
         </div>
         <div className="player-layout">
           <div className="player-frame">
-            <YouTube videoId={VIDEO_ID} onReady={onReady} onPlay={() => setPlayerStatus("playing")} onPause={() => setPlayerStatus("paused")} onEnd={onEnded} onError={() => setPlayerError("YouTube could not load the selected video.")} className="youtube-shell" iframeClassName="youtube-iframe" opts={{ width: "100%", height: "100%", playerVars: { autoplay: 0, controls: 0, disablekb: 1, rel: 0 } }} />
+            <YouTube key={`${window.location.origin}:${roomId}`} videoId={VIDEO_ID} onReady={onReady} onPlay={(event) => { if (playerRef.current !== event.target) return; setPlayerError(null); setPlayerErrorCode(null); setPlayerEmbedBlocked(false); setPlayerStatus("playing"); }} onPause={(event) => { if (playerRef.current === event.target) setPlayerStatus("paused"); }} onEnd={(event) => { if (playerRef.current === event.target) onEnded(); }} onError={onPlayerError} className="youtube-shell" iframeClassName="youtube-iframe" opts={{ width: "100%", height: "100%", playerVars: { autoplay: 0, controls: 0, disablekb: 1, rel: 0, origin: window.location.origin } }} />
           </div>
           <div className="player-console">
             <div className="now-playing">
@@ -371,19 +553,25 @@ function App() {
         </div>
       </section>
       <section className="queue-card" aria-labelledby="queue-title"><header><div><span>COLLABORATIVE QUEUE</span><h2 id="queue-title">Up next</h2></div><strong>{queue.length} {queue.length === 1 ? "video" : "videos"}</strong></header>{queueError ? <p className="queue-message queue-error" role="alert">{queueError}</p> : queue.length === 0 ? <p className={autoplayError ? "queue-message queue-error" : "queue-message"} role={autoplayError ? "alert" : "status"}>{autoplayError ?? autoplayMessage ?? (autoplay?.items.length ? "Related autoplay ready" : "Preparing related autoplay…")}</p> : <ol className="queue-list">{queue.map((item, index) => <li key={item.id}><span>{String(index + 1).padStart(2, "0")}</span><img src={item.thumbnailUrl} alt="" /><div><strong>{item.title}</strong><small>{item.channelTitle} · {formatTime(item.durationSeconds)}</small></div><div className="queue-item-actions"><button type="button" onClick={() => void next()} disabled={!controlsReady || index !== 0 || isQueueUpdating}>Play</button><button type="button" onClick={() => void removeFromQueue(item.id)} disabled={phase !== "ready" || isQueueUpdating} aria-label={`Remove ${item.title} from queue`}>Remove</button></div></li>)}</ol>}</section>
-      {surfOpen && <section ref={surfPanelRef} className="surf-panel" aria-labelledby="surf-title">
-        <header><div><span>YOUTUBE DISCOVERY</span><h2 id="surf-title">Surf the next wave</h2></div><button type="button" onClick={() => setSurfOpen(false)} aria-label="Close YouTube discovery">Close</button></header>
-        <div className="surf-search"><input ref={surfSearchInputRef} value={surfQuery} onChange={(event) => setSurfQuery(event.target.value)} placeholder="Start typing to search YouTube…" aria-label="Search YouTube automatically" /><button type="button" onClick={() => { setSurfQuery(""); setSurfRequest(undefined); }}>Popular</button></div>
+      </div>
+      {surfOpen && <section ref={surfPanelRef} className="surf-panel" id="surf-results" aria-labelledby="surf-title">
+        <header><div><span>YOUTUBE DISCOVERY</span><h2 id="surf-title">Choose what plays next</h2></div><button type="button" onClick={() => setSurfOpen(false)} aria-label="Close YouTube discovery">Close</button></header>
         {!youtubeApiKey && <p className="surf-message">Add <code>VITE_YOUTUBE_API_KEY</code> to <code>.env.local</code>, then restart the dev server.</p>}
         {surfStatus === "loading" && <p className="surf-message">Surfing YouTube…</p>}
         {surfError && <p className="surf-message surf-error" role="alert">{surfError}</p>}
         {surfStatus === "ready" && surfVideos.length === 0 && <p className="surf-message">No embeddable videos found. Keep typing to try another search.</p>}
-        <div className="surf-grid">{surfVideos.map((video) => <article key={video.videoId}><img src={video.thumbnailUrl} alt="" /><div><strong>{video.title}</strong><span>{video.channelTitle} · {formatTime(video.durationSeconds)}</span></div><div className="surf-actions"><button type="button" onClick={() => playVideo(video)} disabled={!controlsReady} title={!controlsReady ? "Join playback above to play this video" : "Play this video now"}>Play now</button><button type="button" onClick={() => void addToQueue(video)} disabled={phase !== "ready" || isQueueUpdating}>Queue</button></div></article>)}</div>
+        <div className="surf-grid">{surfVideos.filter((video) => !rejectedVideoIdsRef.current.has(video.videoId)).map((video) => <article key={video.videoId}><img src={video.thumbnailUrl} alt="" /><div><strong>{video.title}</strong><span>{video.channelTitle} · {formatTime(video.durationSeconds)}</span></div><div className="surf-actions"><button type="button" onClick={() => playVideo(video)} disabled={!controlsReady} title={!controlsReady ? "Join playback above to play this video" : "Play this video now"}>Play now</button><button type="button" onClick={() => void addToQueue(video)} disabled={phase !== "ready" || isQueueUpdating}>Queue</button></div></article>)}</div>
         <div ref={surfSentinelRef} className="surf-sentinel" aria-live="polite">{isSurfLoadingMore ? "Loading more videos…" : surfNextPageToken ? "Scroll for more" : surfVideos.length > 0 ? "You’ve reached the end of these results." : ""}</div>
         <small>Powered by YouTube · <a href="https://www.youtube.com/t/terms" target="_blank" rel="noreferrer">YouTube Terms</a></small>
       </section>}
+      <div className="surf-dock" role="search">
+        <button type="button" className="surf-dock-brand" onClick={openSurf} aria-label="Open YouTube discovery"><span className="brand-mark"><PlayIcon /></span><span>Surf YouTube</span></button>
+        <input ref={surfSearchInputRef} value={surfQuery} onFocus={() => setSurfOpen(true)} onChange={(event) => { setSurfQuery(event.target.value); setSurfOpen(true); }} placeholder="Search songs, artists, mixes…" aria-label="Search YouTube automatically" aria-controls="surf-results" aria-expanded={surfOpen} />
+        <button type="button" className="surf-popular" onClick={() => { setSurfOpen(true); setSurfQuery(""); setSurfRequest(undefined); }}>Popular</button>
+        <button type="button" className="surf-dock-toggle" onClick={() => setSurfOpen((open) => !open)} aria-label={surfOpen ? "Close YouTube discovery" : "Open YouTube discovery"} aria-expanded={surfOpen}>{surfOpen ? "↓" : "↑"}</button>
+      </div>
     </>}
-    <footer><span>STEP 07</span><div className="footer-line" /><p>Surf · shared transport · mini player mode</p><a href="https://www.youtube.com/t/terms" target="_blank" rel="noreferrer">YouTube Terms</a></footer>
+    <footer><span>YT JAM</span><div className="footer-line" /><p>Shared listening, one timeline</p><a href="https://www.youtube.com/t/terms" target="_blank" rel="noreferrer">YouTube Terms</a></footer>
   </main>;
 }
 

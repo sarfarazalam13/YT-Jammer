@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  browserRegion,
+  filterVideoItemsForRegion,
   fetchYouTubeVideos,
   fetchYouTubeVideoPage,
   parseIsoDuration,
@@ -14,6 +16,20 @@ describe("YouTube discovery helpers", () => {
     expect(parseIsoDuration("PT4M13S")).toBe(253);
     expect(parseIsoDuration("PT1H2M3S")).toBe(3723);
     expect(parseIsoDuration("invalid")).toBe(0);
+  });
+
+  it("uses the device timezone when it gives a more accurate playback region", () => {
+    expect(browserRegion("en-US", "Asia/Calcutta")).toBe("IN");
+    expect(browserRegion("fr-FR", "Europe/Paris")).toBe("FR");
+  });
+
+  it("filters videos blocked in or not allowed for the playback region", () => {
+    const items = [
+      { id: "dQw4w9WgXcQ", contentDetails: { regionRestriction: { blocked: ["IN"] } } },
+      { id: "M7lc1UVf-VE", contentDetails: { regionRestriction: { allowed: ["US"] } } },
+      { id: "jNQXAC9IVRw", contentDetails: {} },
+    ];
+    expect(filterVideoItemsForRegion(items, "IN")).toEqual([items[2]]);
   });
 
   it("parses safe video metadata and rejects malformed ids", () => {
@@ -75,6 +91,7 @@ describe("YouTube discovery helpers", () => {
     const page = await fetchYouTubeVideoPage({ apiKey: "key", pageToken: "page-1", fetcher, storage: null });
     expect(page.nextPageToken).toBe("page-2");
     expect(String(fetcher.mock.calls[0]?.[0])).toContain("pageToken=page-1");
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain("videoSyndicated=true");
   });
 
   it("selects the first unplayed video for the autoplay mix", () => {

@@ -1,7 +1,7 @@
 import { isTrustedYouTubeThumbnail, YOUTUBE_VIDEO_ID_PATTERN, type YouTubeVideo } from "./sync";
 
 const API_ROOT = "https://www.googleapis.com/youtube/v3";
-const CACHE_PREFIX = "yt-jam:youtube:";
+const CACHE_PREFIX = "yt-jam:youtube:v3:";
 const CACHE_TTL_MS = 15 * 60 * 1000;
 
 export const youtubeApiKey = (import.meta.env.VITE_YOUTUBE_API_KEY ?? "").trim();
@@ -27,7 +27,15 @@ export function parseIsoDuration(value: string): number {
   return Number(match[1] ?? 0) * 3600 + Number(match[2] ?? 0) * 60 + Number(match[3] ?? 0);
 }
 
-export function browserRegion(language = navigator.language): string {
+export function browserRegion(
+  language = navigator.language,
+  timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone,
+): string {
+  const timeZoneRegion: Record<string, string> = {
+    "Asia/Calcutta": "IN",
+    "Asia/Kolkata": "IN",
+  };
+  if (timeZoneRegion[timeZone]) return timeZoneRegion[timeZone];
   const region = language.split("-")[1]?.toUpperCase();
   return region && /^[A-Z]{2}$/.test(region) ? region : "US";
 }
@@ -98,6 +106,10 @@ export function parseVideoItems(
     const contentDetails = item.contentDetails && typeof item.contentDetails === "object"
       ? item.contentDetails as Record<string, unknown>
       : {};
+    const status = item.status && typeof item.status === "object"
+      ? item.status as Record<string, unknown>
+      : {};
+    if (status.embeddable === false || status.privacyStatus === "private") return [];
 
     return [{
       videoId: idValue,
@@ -110,6 +122,25 @@ export function parseVideoItems(
         typeof contentDetails.duration === "string" ? parseIsoDuration(contentDetails.duration) : 0
       ),
     }];
+  });
+}
+
+export function filterVideoItemsForRegion(items: unknown, regionCode: string): unknown[] {
+  if (!Array.isArray(items)) return [];
+  const region = regionCode.toUpperCase();
+  return items.filter((raw) => {
+    if (!raw || typeof raw !== "object") return false;
+    const item = raw as Record<string, unknown>;
+    const details = item.contentDetails && typeof item.contentDetails === "object"
+      ? item.contentDetails as Record<string, unknown>
+      : {};
+    const restriction = details.regionRestriction && typeof details.regionRestriction === "object"
+      ? details.regionRestriction as Record<string, unknown>
+      : null;
+    if (!restriction) return true;
+    const allowed = Array.isArray(restriction.allowed) ? restriction.allowed.map(String) : null;
+    const blocked = Array.isArray(restriction.blocked) ? restriction.blocked.map(String) : [];
+    return allowed ? allowed.includes(region) : !blocked.includes(region);
   });
 }
 
@@ -156,52 +187,38 @@ export async function fetchYouTubeVideoPage({
   if (cached) return cached;
 
   let videos: YouTubeVideo[];
-  if (!normalizedQuery) {
-    const url = new URL(`${API_ROOT}/videos`);
-    url.search = new URLSearchParams({
-      part: "snippet,contentDetails",
-      chart: "mostPopular",
-      maxResults: "12",
-      regionCode,
-      key: apiKey,
-      ...(pageToken ? { pageToken } : {}),
-    }).toString();
-    const body = await requestJson(url, fetcher, signal);
-    videos = parseVideoItems(body.items);
-    const page = {
-      videos,
-      nextPageToken: typeof body.nextPageToken === "string" ? body.nextPageToken : null,
-    };
-    writeVideoCache(storage, key, page, now);
-    return page;
-  } else {
+  {
     const searchUrl = new URL(`${API_ROOT}/search`);
     searchUrl.search = new URLSearchParams({
       part: "snippet",
       type: "video",
       videoEmbeddable: "true",
+      videoSyndicated: "true",
       safeSearch: "moderate",
       maxResults: "12",
       regionCode,
-      q: normalizedQuery,
+      ...(normalizedQuery ? { q: normalizedQuery } : { q: "music", order: "viewCount", videoCategoryId: "10" }),
       key: apiKey,
       ...(pageToken ? { pageToken } : {}),
     }).toString();
     const searchBody = await requestJson(searchUrl, fetcher, signal);
     const preliminary = parseVideoItems(searchBody.items);
-    if (preliminary.length === 0) return { videos: [], nextPageToken: null };
+    if (preliminary.length === 0) return {
+      videos: [],
+      nextPageToken: typeof searchBody.nextPageToken === "string" ? searchBody.nextPageToken : null,
+    };
 
     const detailsUrl = new URL(`${API_ROOT}/videos`);
     detailsUrl.search = new URLSearchParams({
-      part: "contentDetails",
+      part: "contentDetails,status",
       id: preliminary.map((video) => video.videoId).join(","),
       key: apiKey,
     }).toString();
     const detailsBody = await requestJson(detailsUrl, fetcher, signal);
-    const durationMap = new Map(
-      parseVideoItems(detailsBody.items).map((video) => [video.videoId, video.durationSeconds]),
-    );
-    videos = preliminary.map((video) => ({
+    const playableDetails = parseVideoItems(filterVideoItemsForRegion(detailsBody.items, regionCode));
+    const durationMap = new Map(playableDetails.map((video) => [video.videoId, video.durationSeconds]));
+    const playableIds = new Set(playableDetails.map((video) => video.videoId));
+    videos = preliminary.filter((video) => playableIds.has(video.videoId)).map((video) => ({
       ...video,
       durationSeconds: durationMap.get(video.videoId) ?? 0,
     }));

@@ -1,4 +1,5 @@
-export const VIDEO_ID = "dQw4w9WgXcQ";
+export const VIDEO_ID = "M7lc1UVf-VE";
+export const LEGACY_VIDEO_ID = "dQw4w9WgXcQ";
 export const SEEK_THRESHOLD_SECONDS = 1.25;
 export const YOUTUBE_VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{11}$/;
 export const PLAYBACK_RATES = [0.25, 0.5, 1, 1.25, 1.5, 2] as const;

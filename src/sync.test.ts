@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  LEGACY_VIDEO_ID,
   VIDEO_ID,
   canClaimAdvance,
   clampPosition,
@@ -163,7 +164,7 @@ describe("playback synchronization helpers", () => {
   it("selects five unique autoplay videos while respecting exclusions", () => {
     const videos = [
       fallbackVideo(VIDEO_ID),
-      fallbackVideo("M7lc1UVf-VE"),
+      fallbackVideo(LEGACY_VIDEO_ID),
       fallbackVideo("aqz-KE-bpKQ"),
       fallbackVideo("jNQXAC9IVRw"),
       fallbackVideo("9bZkp7q19f0"),
@@ -173,7 +174,7 @@ describe("playback synchronization helpers", () => {
     ];
     const selected = selectAutoplayVideos(videos, new Set([VIDEO_ID]));
     expect(selected.map((video) => video.videoId)).toEqual([
-      "M7lc1UVf-VE",
+      LEGACY_VIDEO_ID,
       "aqz-KE-bpKQ",
       "jNQXAC9IVRw",
       "9bZkp7q19f0",

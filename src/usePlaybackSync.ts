@@ -387,11 +387,16 @@ export function usePlaybackSync(roomId: string | null) {
         );
         if (!claim.committed) return false;
 
-        const roomSnapshot = await get(roomRef.current);
-        const currentPlayback = parsePlaybackState(roomSnapshot.child("playback").val());
+        if (!playbackRef.current || !queueRef.current || !autoplayRef.current) return false;
+        const [playbackSnapshot, queueSnapshot, autoplaySnapshot] = await Promise.all([
+          get(playbackRef.current),
+          get(queueRef.current),
+          get(autoplayRef.current),
+        ]);
+        const currentPlayback = parsePlaybackState(playbackSnapshot.val());
         if (!currentPlayback || currentPlayback.commandId !== fromCommandId) return false;
-        const latestQueue = parseQueue(roomSnapshot.child("queue").val());
-        const latestAutoplay = parseAutoplayBuffer(roomSnapshot.child("autoplay").val());
+        const latestQueue = parseQueue(queueSnapshot.val());
+        const latestAutoplay = parseAutoplayBuffer(autoplaySnapshot.val());
         const queueItem = latestQueue[0];
         const autoplayItem = latestAutoplay?.items[0];
         const item = queueItem ?? autoplayItem;
