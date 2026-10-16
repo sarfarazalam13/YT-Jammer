@@ -44,7 +44,6 @@ test("Surf searches automatically after typing", async ({ page }) => {
     await route.fulfill({ json: { items: [{ id: "abcdefghijk", snippet: { title: "Continuous result", channelTitle: "YT Jam Tests", thumbnails: {} }, contentDetails: { duration: "PT3M" } }] } });
   });
   await page.goto("/?room=smoke-room", { waitUntil: "domcontentloaded", timeout: 10_000 });
-  const playerTop = await page.locator("#player").evaluate((element) => element.getBoundingClientRect().top + window.scrollY);
   const queueTop = await page.locator(".queue-card").evaluate((element) => element.getBoundingClientRect().top + window.scrollY);
   await page.getByRole("button", { name: "Surf YouTube" }).click();
   const search = page.getByLabel("Search YouTube or paste a video or playlist link");
@@ -52,8 +51,29 @@ test("Surf searches automatically after typing", async ({ page }) => {
   await expect(page.locator(".surf-panel")).toBeVisible();
   await search.fill("lofi");
   await expect(page.getByText("Continuous result")).toBeVisible({ timeout: 5_000 });
-  await expect.poll(() => page.locator("#player").evaluate((element) => element.getBoundingClientRect().top + window.scrollY)).toBe(playerTop);
-  await expect.poll(() => page.locator(".queue-card").evaluate((element) => element.getBoundingClientRect().top + window.scrollY)).toBe(queueTop);
+  if (test.info().project.name === "mobile-chromium") {
+    const floatingPlayer = page.locator("#player");
+    await expect(floatingPlayer).toHaveClass(/discovery-floating/);
+    await expect.poll(() => floatingPlayer.evaluate((element) => element.getBoundingClientRect().top)).toBeLessThanOrEqual(20);
+    const frameBox = await floatingPlayer.locator(".player-frame").boundingBox();
+    expect(frameBox?.width).toBeGreaterThanOrEqual(200);
+    expect(frameBox?.height).toBeGreaterThanOrEqual(200);
+    const columns = await page.locator(".surf-panel > .surf-grid").last().evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length);
+    expect(columns).toBe(2);
+  } else {
+    expect(await page.locator("#player").evaluate((element) => getComputedStyle(element).position)).toBe("relative");
+  }
+  if (test.info().project.name === "mobile-chromium") {
+    await expect.poll(() => page.locator(".queue-card").evaluate((element) => element.getBoundingClientRect().top + window.scrollY)).toBe(queueTop);
+    const headerBox = await page.locator(".surf-panel > header").boundingBox();
+    expect(headerBox).not.toBeNull();
+    await page.mouse.move(headerBox!.x + headerBox!.width / 2, headerBox!.y + 24);
+    await page.mouse.down();
+    await page.mouse.move(headerBox!.x + headerBox!.width / 2, headerBox!.y + 112, { steps: 5 });
+    await page.mouse.up();
+    await expect(page.locator(".surf-panel")).toHaveCount(0);
+    await expect(page.locator(".surf-dock-toggle")).toBeFocused();
+  }
 });
 
 test("mixed YouTube links keep the linked song usable when playlist import fails", async ({ page }) => {

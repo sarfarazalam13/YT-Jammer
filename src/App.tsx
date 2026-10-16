@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import { createRoomId, isValidRoomId, normalizeRoomId, roomIdFromSearch, roomUrl } from "./rooms";
 import { RoomYouTubePlayer, type YouTubePlayerApi } from "./RoomYouTubePlayer";
 import { LEGACY_VIDEO_ID, PLAYBACK_RATES, VIDEO_ID, clampPosition, expectedPosition, formatTime, isOwnLatestCommand, playbackVideo, resolvePlayerErrorTarget, selectAutoplayVideos, shouldSeek, type PlaybackState, type YouTubeVideo } from "./sync";
@@ -63,6 +63,8 @@ function App() {
   const surfSentinelRef = useRef<HTMLDivElement | null>(null);
   const surfPanelRef = useRef<HTMLElement | null>(null);
   const surfSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const surfToggleButtonRef = useRef<HTMLButtonElement | null>(null);
+  const surfDragRef = useRef<{ pointerId: number; startY: number; startedAt: number } | null>(null);
   const surfVersionRef = useRef(0);
   const surfPageCountRef = useRef(0);
   const lastSurfPageAtRef = useRef(0);
@@ -95,6 +97,9 @@ function App() {
   const [muted, setMuted] = useState(() => readPlayerPreferences(window.localStorage).muted);
   const [availableRates, setAvailableRates] = useState<number[]>([1]);
   const [surfOpen, setSurfOpen] = useState(false);
+  const [playerFlowHeight, setPlayerFlowHeight] = useState(0);
+  const [surfDragOffset, setSurfDragOffset] = useState(0);
+  const [isSurfDragging, setIsSurfDragging] = useState(false);
   const [surfQuery, setSurfQuery] = useState("");
   const [surfRequest, setSurfRequest] = useState<string | undefined>();
   const [surfStatus, setSurfStatus] = useState<SurfStatus>("idle");
@@ -125,13 +130,48 @@ function App() {
   const createRoom = useCallback(() => enterRoom(createRoomId()), [enterRoom]);
   const leaveRoom = useCallback(() => { playerRef.current?.pauseVideo?.(); window.history.pushState({}, "", window.location.pathname); setRoomId(null); }, []);
   const copyInvite = useCallback(async () => { if (!roomId) return; try { await navigator.clipboard.writeText(roomUrl(roomId, window.location)); setCopyLabel("Invite copied"); window.setTimeout(() => setCopyLabel("Copy invite"), 1_800); } catch { setCopyLabel("Copy failed"); } }, [roomId]);
-  const openSurf = useCallback(() => {
+  const revealSurf = useCallback(() => {
+    if (!surfOpen) setPlayerFlowHeight(playerCardRef.current?.getBoundingClientRect().height ?? 0);
     setSurfOpen(true);
+    setSurfDragOffset(0);
+  }, [surfOpen]);
+  const openSurf = useCallback(() => {
+    revealSurf();
     setSurfRequest(undefined);
     window.requestAnimationFrame(() => {
       surfSearchInputRef.current?.focus({ preventScroll: true });
     });
+  }, [revealSurf]);
+  const closeSurf = useCallback((restoreFocus = true) => {
+    surfDragRef.current = null;
+    setIsSurfDragging(false);
+    setSurfDragOffset(0);
+    setSurfOpen(false);
+    surfSearchInputRef.current?.blur();
+    if (restoreFocus) window.requestAnimationFrame(() => surfToggleButtonRef.current?.focus({ preventScroll: true }));
   }, []);
+  const startSurfDrag = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    if ((event.target as HTMLElement).closest("button, a, input")) return;
+    surfDragRef.current = { pointerId: event.pointerId, startY: event.clientY, startedAt: performance.now() };
+    setIsSurfDragging(true);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, []);
+  const moveSurfDrag = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    const drag = surfDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setSurfDragOffset(Math.max(0, event.clientY - drag.startY));
+  }, []);
+  const finishSurfDrag = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    const drag = surfDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const distance = Math.max(0, event.clientY - drag.startY);
+    const velocity = distance / Math.max(1, performance.now() - drag.startedAt);
+    surfDragRef.current = null;
+    setIsSurfDragging(false);
+    if (distance >= 72 || (distance >= 24 && velocity >= 0.55)) closeSurf();
+    else setSurfDragOffset(0);
+  }, [closeSurf]);
 
   useEffect(() => { const readRoom = () => setRoomId(roomIdFromSearch(window.location.search)); window.addEventListener("popstate", readRoom); return () => window.removeEventListener("popstate", readRoom); }, []);
   useEffect(() => {
@@ -168,6 +208,15 @@ function App() {
     });
     return () => window.cancelAnimationFrame(frame);
   }, [surfOpen]);
+
+  useEffect(() => {
+    if (!surfOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeSurf();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [closeSurf, surfOpen]);
 
   useEffect(() => {
     if (!surfOpen) return;
@@ -647,7 +696,7 @@ function App() {
   const sharedControlHint = controlsReady ? undefined : "Join playback on this device to use this control";
   const showTopSongs = topSongVideos.length > 0 && (!surfRequest || surfStatus === "error");
 
-  return <main className={`app-shell ${roomId ? "has-room" : ""}`}>
+  return <main className={`app-shell ${roomId ? "has-room" : ""} ${surfOpen ? "surf-is-open" : ""}`}>
     {roomId && <div className="music-backdrop" aria-hidden="true">
       {currentVideo?.thumbnailUrl && <div key={currentVideoId} className="music-backdrop-art" style={{ backgroundImage: `url(${currentVideo.thumbnailUrl})` }} />}
       <div className="music-backdrop-shade" />
@@ -665,7 +714,8 @@ function App() {
       </section>
       {playerReady && phase === "ready" && (!playbackEnabled || !audioUnlocked) && !joinNoticeDismissed && <div className="join-notice-layer"><section className="join-notice" role="dialog" aria-labelledby="join-notice-title" aria-describedby="join-notice-copy"><span>{playbackEnabled ? "SYNCED SILENTLY" : "LOCAL PLAYBACK OFF"}</span><div className="join-notice-icon"><PlayIcon /></div><strong id="join-notice-title">{playbackEnabled ? "You’re in the room" : "Playback is off here"}</strong><p id="join-notice-copy">{playbackEnabled ? "The room is playing silently. Join the JAM to turn on sound and jump to the live position." : "Rejoin playback from the room’s current position. Browsing and queue controls stay available either way."}</p><div className="join-notice-actions"><button type="button" className="join-primary" onClick={joinPlayback} disabled={isArmingPlayback}><PlayIcon />{isArmingPlayback ? "Joining…" : playbackEnabled ? "Join the JAM" : "Join playback"}</button><button type="button" className="join-secondary" onClick={() => setJoinNoticeDismissed(true)}>Keep muted</button></div></section></div>}
       <div className="player-workspace">
-      <section ref={playerCardRef} className={`player-card mode-${playerMode}`} id="player" aria-label="Synchronized YouTube player controls">
+      {surfOpen && <div className="player-flow-placeholder" style={{ height: playerFlowHeight }} aria-hidden="true" />}
+      <section ref={playerCardRef} className={`player-card mode-${playerMode}${surfOpen ? " discovery-floating" : ""}`} id="player" aria-label="Synchronized YouTube player controls">
         <div className="track-art-glow" style={currentVideo?.thumbnailUrl ? { backgroundImage: `url(${currentVideo.thumbnailUrl})` } : undefined} aria-hidden="true" />
         <div className="player-toolbar">
           <div className="mode-switch" role="group" aria-label="Player display mode">
@@ -685,6 +735,7 @@ function App() {
               <div className={`equalizer ${playerStatus === "playing" ? "is-playing" : ""}`} aria-hidden="true"><i /><i /><i /><i /></div>
               <div><span className="meta-label">NOW PLAYING · {roomId}</span><strong>{currentVideo?.title ?? "YouTube video"}</strong><small>{currentVideo?.channelTitle ?? currentVideoId}</small></div>
             </div>
+            <div className="floating-player-status" aria-hidden="true"><span className={`status-light status-${phase === "ready" ? playerStatus : phase}`} />{playbackEnabled ? statusLabel : "Playback off"}</div>
             <div className="timeline">
               <input type="range" min="0" max={timelineMax} step="0.1" value={clampPosition(timelineValue, timelineMax)} disabled={!controlsReady} title={sharedControlHint ?? "Seek shared playback"} aria-label="Seek shared playback" aria-valuetext={`${formatTime(timelineValue)} of ${formatTime(timelineMax)}`} onChange={(event) => setSeekDraft(Number(event.target.value))} onPointerUp={() => { if (seekDraft !== null) publishAt(seekDraft); setSeekDraft(null); }} onKeyUp={() => { if (seekDraft !== null) publishAt(seekDraft); setSeekDraft(null); }} />
               <div><span>{formatTime(timelineValue)}</span><span aria-label={`${formatTime(remainingTime)} remaining`}>−{formatTime(remainingTime)}</span></div>
@@ -710,8 +761,12 @@ function App() {
       </section>
       <section className="queue-card" aria-labelledby="queue-title"><header><div><span>COLLABORATIVE QUEUE</span><h2 id="queue-title">Up next</h2></div><strong>{queue.length} {queue.length === 1 ? "video" : "videos"}</strong></header>{queueError ? <p className="queue-message queue-error" role="alert">{queueError}</p> : queue.length === 0 ? <p className={autoplayError ? "queue-message queue-error" : "queue-message"} role={autoplayError ? "alert" : "status"}>{autoplayError ?? autoplayMessage ?? (autoplay?.items.length ? `${autoplay.items.length} related ${autoplay.items.length === 1 ? "track" : "tracks"} ready` : "Preparing related autoplay…")}</p> : <ol className="queue-list">{queue.map((item, index) => <li key={item.id}><span>{String(index + 1).padStart(2, "0")}</span><img src={item.thumbnailUrl} alt="" /><div><strong>{item.title}</strong><small>{item.channelTitle} · {formatTime(item.durationSeconds)}</small></div><div className="queue-item-actions"><button type="button" onClick={() => void next()} disabled={!controlsReady || index !== 0 || isQueueUpdating}>Play</button><button type="button" onClick={() => void removeFromQueue(item.id)} disabled={phase !== "ready" || isQueueUpdating} aria-label={`Remove ${item.title} from queue`}>Remove</button></div></li>)}</ol>}</section>
       </div>
-      {surfOpen && <section ref={surfPanelRef} className="surf-panel" id="surf-results" aria-labelledby="surf-title">
-        <header><div><span>YOUTUBE DISCOVERY</span><h2 id="surf-title">Choose what plays next</h2></div><button type="button" onClick={() => setSurfOpen(false)} aria-label="Close YouTube discovery">Close</button></header>
+      {surfOpen && <section ref={surfPanelRef} className={`surf-panel${isSurfDragging ? " is-dragging" : ""}`} id="surf-results" aria-labelledby="surf-title" style={surfDragOffset > 0 ? { transform: `translateY(${surfDragOffset}px)` } as CSSProperties : undefined}>
+        <header onPointerDown={startSurfDrag} onPointerMove={moveSurfDrag} onPointerUp={finishSurfDrag} onPointerCancel={finishSurfDrag}>
+          <span className="surf-drawer-grip" aria-hidden="true" />
+          <div><span>YOUTUBE DISCOVERY</span><h2 id="surf-title">Choose what plays next</h2></div>
+          <button type="button" onClick={() => closeSurf()} aria-label="Close YouTube discovery">Close</button>
+        </header>
         {!youtubeApiKey && <p className="surf-message">Add <code>VITE_YOUTUBE_API_KEY</code> to <code>.env.local</code>, then restart the dev server.</p>}
         {youtubeApiKey && <p className="surf-budget" role="status">{searchBudget.remaining} of {searchBudget.limit} uncached searches left today · links, playlists, Popular, and cached results do not use this search budget</p>}
         {surfStatus === "loading" && <p className="surf-message">Surfing YouTube…</p>}
@@ -727,9 +782,9 @@ function App() {
       </section>}
       <div className="surf-dock" role="search">
         <button type="button" className="surf-dock-brand" onClick={openSurf} aria-label="Open YouTube discovery"><span className="brand-mark"><PlayIcon /></span><span>Surf YouTube</span></button>
-        <input ref={surfSearchInputRef} value={surfQuery} onFocus={() => setSurfOpen(true)} onChange={(event) => { setSurfQuery(event.target.value); setSurfOpen(true); }} placeholder="Search or paste a YouTube video / playlist…" aria-label="Search YouTube or paste a video or playlist link" aria-controls="surf-results" aria-expanded={surfOpen} />
-        <button type="button" className="surf-popular" onClick={() => { setSurfOpen(true); setSurfQuery(""); setSurfRequest(undefined); }}>Popular</button>
-        <button type="button" className="surf-dock-toggle" onClick={() => setSurfOpen((open) => !open)} aria-label={surfOpen ? "Close YouTube discovery" : "Open YouTube discovery"} aria-expanded={surfOpen}>{surfOpen ? "↓" : "↑"}</button>
+        <input ref={surfSearchInputRef} value={surfQuery} onFocus={revealSurf} onChange={(event) => { setSurfQuery(event.target.value); revealSurf(); }} placeholder="Search or paste a YouTube video / playlist…" aria-label="Search YouTube or paste a video or playlist link" aria-controls="surf-results" aria-expanded={surfOpen} />
+        <button type="button" className="surf-popular" onClick={() => { revealSurf(); setSurfQuery(""); setSurfRequest(undefined); }}>Popular</button>
+        <button ref={surfToggleButtonRef} type="button" className="surf-dock-toggle" onClick={() => { if (surfOpen) closeSurf(false); else openSurf(); }} aria-label={surfOpen ? "Close YouTube discovery" : "Open YouTube discovery"} aria-expanded={surfOpen}>{surfOpen ? "↓" : "↑"}</button>
       </div>
     </>}
     <footer><span>YT JAM</span><div className="footer-line" /><p>Shared listening, one timeline</p><a href="https://www.youtube.com/t/terms" target="_blank" rel="noreferrer">YouTube Terms</a></footer>
